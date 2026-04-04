@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { Car, Plus, Pencil, Trash, QrCode, X } from "@phosphor-icons/react";
+import { Car, Plus, Pencil, Trash, QrCode, X, Handshake } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -129,8 +129,29 @@ export default function Vehicles() {
   };
 
   const getQRUrl = (vehicle, type) => {
-    const code = type === "fuel" ? vehicle.qr_code_fuel : vehicle.qr_code_damage;
+    let code;
+    if (type === "fuel") code = vehicle.qr_code_fuel;
+    else if (type === "damage") code = vehicle.qr_code_damage;
+    else code = vehicle.qr_code_handover || `handover_${vehicle.vehicle_id}`;
     return `${BACKEND_URL}/${type}/${code}`;
+  };
+
+  const getQRTitle = (type) => {
+    const titles = {
+      fuel: "QR kód pro tankování",
+      damage: "QR kód pro hlášení poškození",
+      handover: "QR kód pro předávku vozidla"
+    };
+    return titles[type] || "QR kód";
+  };
+
+  const getQRDescription = (type) => {
+    const descriptions = {
+      fuel: "zaznamenání tankování",
+      damage: "nahlášení poškození",
+      handover: "předávací protokol"
+    };
+    return descriptions[type] || "";
   };
 
   if (loading) {
@@ -227,6 +248,19 @@ export default function Vehicles() {
                 >
                   <QrCode size={16} className="mr-1" />
                   Poškození
+                </Button>
+              </div>
+
+              <div className="mt-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => openQRModal(vehicle, "handover")}
+                  className="w-full bg-[#002FA7]/5 border-[#002FA7]/20 text-[#002FA7] hover:bg-[#002FA7]/10"
+                  data-testid={`qr-handover-${vehicle.vehicle_id}`}
+                >
+                  <Handshake size={16} className="mr-1" />
+                  Předávka vozidla
                 </Button>
               </div>
 
@@ -404,7 +438,7 @@ export default function Vehicles() {
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle className="font-['Manrope']">
-              {qrType === "fuel" ? "QR kód pro tankování" : "QR kód pro hlášení poškození"}
+              {getQRTitle(qrType)}
             </DialogTitle>
           </DialogHeader>
           {selectedVehicle && (
@@ -420,8 +454,13 @@ export default function Vehicles() {
                 />
               </div>
               <p className="text-xs text-[#52525B] mt-4">
-                Naskenujte pro {qrType === "fuel" ? "zaznamenání tankování" : "nahlášení poškození"}
+                Naskenujte pro {getQRDescription(qrType)}
               </p>
+              {qrType === "handover" && (
+                <p className="text-xs text-[#002FA7] mt-2 font-medium">
+                  Obsahuje kontrolu kapalin a 6 povinných fotografií
+                </p>
+              )}
             </div>
           )}
         </DialogContent>

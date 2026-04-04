@@ -16,6 +16,7 @@ import GPSTracking from "./pages/GPSTracking";
 import Reports from "./pages/Reports";
 import PublicFuelForm from "./pages/PublicFuelForm";
 import PublicDamageForm from "./pages/PublicDamageForm";
+import PublicHandoverForm from "./pages/PublicHandoverForm";
 
 // Components
 import Layout from "./components/Layout";
@@ -163,6 +164,7 @@ const AppRouter = () => {
       <Route path="/login" element={<Login />} />
       <Route path="/fuel/:qrCode" element={<PublicFuelForm />} />
       <Route path="/damage/:qrCode" element={<PublicDamageForm />} />
+      <Route path="/handover/:qrCode" element={<PublicHandoverForm />} />
       
       {/* Protected routes */}
       <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>

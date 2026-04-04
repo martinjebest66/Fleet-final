@@ -78,6 +78,7 @@ class Vehicle(BaseModel):
     assigned_instructor_id: Optional[str] = None
     qr_code_fuel: str
     qr_code_damage: str
+    qr_code_handover: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -233,6 +234,44 @@ class GPSTrip(BaseModel):
     synced_to_logbook: bool = False
     created_at: datetime
 
+# QR Handover Protocol models (mobile form submission)
+class FluidChecks(BaseModel):
+    engine_oil: bool = False
+    coolant: bool = False
+    brake_fluid: bool = False
+    windshield_washer: bool = False
+    other_fluids: bool = False
+    other_fluids_note: Optional[str] = None
+
+class HandoverPhoto(BaseModel):
+    photo_type: str  # front, rear, left, right, interior, dashboard
+    photo_url: str
+    timestamp: str
+
+class QRHandoverCreate(BaseModel):
+    vehicle_id: str
+    handler_name: str
+    handler_type: str  # převzetí (takeover), předání (handover)
+    odometer: int
+    fuel_level: int  # percentage from dashboard photo
+    fluid_checks: FluidChecks
+    photos: List[HandoverPhoto]
+    notes: Optional[str] = None
+
+class QRHandover(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    qr_handover_id: str
+    vehicle_id: str
+    vehicle_info: Optional[str] = None
+    handler_name: str
+    handler_type: str
+    odometer: int
+    fuel_level: int
+    fluid_checks: dict
+    photos: List[dict]
+    notes: Optional[str] = None
+    created_at: datetime
+
 # ======================== AUTH HELPERS ========================
 
 async def get_current_user(request: Request) -> User:
@@ -378,6 +417,9 @@ async def get_vehicles(user: User = Depends(get_current_user)):
             v['created_at'] = datetime.fromisoformat(v['created_at'])
         if isinstance(v.get('updated_at'), str):
             v['updated_at'] = datetime.fromisoformat(v['updated_at'])
+        # Add qr_code_handover if missing (for existing vehicles)
+        if not v.get('qr_code_handover'):
+            v['qr_code_handover'] = f"handover_{v['vehicle_id']}"
     return vehicles
 
 @api_router.get("/vehicles/{vehicle_id}", response_model=Vehicle)
@@ -390,6 +432,9 @@ async def get_vehicle(vehicle_id: str, user: User = Depends(get_current_user)):
         vehicle['created_at'] = datetime.fromisoformat(vehicle['created_at'])
     if isinstance(vehicle.get('updated_at'), str):
         vehicle['updated_at'] = datetime.fromisoformat(vehicle['updated_at'])
+    # Add qr_code_handover if missing
+    if not vehicle.get('qr_code_handover'):
+        vehicle['qr_code_handover'] = f"handover_{vehicle['vehicle_id']}"
     return Vehicle(**vehicle)
 
 @api_router.post("/vehicles", response_model=Vehicle)
@@ -403,6 +448,7 @@ async def create_vehicle(data: VehicleCreate, user: User = Depends(get_current_u
         **data.model_dump(),
         "qr_code_fuel": f"fuel_{vehicle_id}",
         "qr_code_damage": f"damage_{vehicle_id}",
+        "qr_code_handover": f"handover_{vehicle_id}",
         "created_at": now.isoformat(),
         "updated_at": now.isoformat()
     }
@@ -448,13 +494,16 @@ async def delete_vehicle(vehicle_id: str, user: User = Depends(get_current_user)
 @api_router.get("/public/vehicle/{qr_code}")
 async def get_vehicle_by_qr(qr_code: str):
     """Get vehicle info by QR code (public endpoint for mobile)"""
-    # Check if it's a fuel or damage QR code
+    # Check if it's a fuel, damage, or handover QR code
     if qr_code.startswith("fuel_"):
         vehicle_id = qr_code.replace("fuel_", "")
         qr_type = "fuel"
     elif qr_code.startswith("damage_"):
         vehicle_id = qr_code.replace("damage_", "")
         qr_type = "damage"
+    elif qr_code.startswith("handover_"):
+        vehicle_id = qr_code.replace("handover_", "")
+        qr_type = "handover"
     else:
         raise HTTPException(status_code=400, detail="Neplatný QR kód")
     
@@ -468,6 +517,7 @@ async def get_vehicle_by_qr(qr_code: str):
         "brand": vehicle["brand"],
         "model": vehicle["model"],
         "odometer": vehicle["odometer"],
+        "fuel_type": vehicle.get("fuel_type", "benzín"),
         "qr_type": qr_type
     }
 
@@ -874,6 +924,102 @@ async def create_handover_protocol(data: HandoverProtocolCreate, user: User = De
         protocol['instructor_name'] = instructor['name']
     
     return HandoverProtocol(**protocol)
+
+# ======================== QR HANDOVER ROUTES ========================
+
+@api_router.get("/qr-handovers")
+async def get_qr_handovers(
+    vehicle_id: Optional[str] = None,
+    user: User = Depends(get_current_user)
+):
+    """Get QR handover protocols with optional filters"""
+    query = {}
+    if vehicle_id:
+        query["vehicle_id"] = vehicle_id
+    
+    handovers = await db.qr_handovers.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    
+    for h in handovers:
+        if isinstance(h.get('created_at'), str):
+            h['created_at'] = datetime.fromisoformat(h['created_at'])
+        
+        vehicle = await db.vehicles.find_one({"vehicle_id": h["vehicle_id"]}, {"_id": 0})
+        if vehicle:
+            h['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+    
+    return handovers
+
+@api_router.get("/qr-handovers/{qr_handover_id}")
+async def get_qr_handover(qr_handover_id: str, user: User = Depends(get_current_user)):
+    """Get a single QR handover protocol"""
+    handover = await db.qr_handovers.find_one({"qr_handover_id": qr_handover_id}, {"_id": 0})
+    if not handover:
+        raise HTTPException(status_code=404, detail="Předávací protokol nenalezen")
+    
+    if isinstance(handover.get('created_at'), str):
+        handover['created_at'] = datetime.fromisoformat(handover['created_at'])
+    
+    vehicle = await db.vehicles.find_one({"vehicle_id": handover["vehicle_id"]}, {"_id": 0})
+    if vehicle:
+        handover['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+    
+    return handover
+
+# Public endpoint for QR handover submission
+@api_router.post("/public/qr-handover")
+async def create_public_qr_handover(data: QRHandoverCreate):
+    """Create QR handover protocol via QR code (public endpoint for mobile)"""
+    vehicle = await db.vehicles.find_one({"vehicle_id": data.vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+    
+    # Validate that all 6 required photos are provided
+    required_photo_types = {"front", "rear", "left", "right", "interior", "dashboard"}
+    provided_photo_types = {p.photo_type for p in data.photos}
+    
+    if provided_photo_types != required_photo_types:
+        missing = required_photo_types - provided_photo_types
+        raise HTTPException(status_code=400, detail=f"Chybí požadované fotografie: {', '.join(missing)}")
+    
+    # Validate fluid checks - all must be checked
+    if not all([
+        data.fluid_checks.engine_oil,
+        data.fluid_checks.coolant,
+        data.fluid_checks.brake_fluid,
+        data.fluid_checks.windshield_washer,
+        data.fluid_checks.other_fluids
+    ]):
+        raise HTTPException(status_code=400, detail="Všechny provozní kapaliny musí být zkontrolovány")
+    
+    qr_handover_id = f"qrh_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    
+    handover = {
+        "qr_handover_id": qr_handover_id,
+        "vehicle_id": data.vehicle_id,
+        "handler_name": data.handler_name,
+        "handler_type": data.handler_type,
+        "odometer": data.odometer,
+        "fuel_level": data.fuel_level,
+        "fluid_checks": data.fluid_checks.model_dump(),
+        "photos": [p.model_dump() for p in data.photos],
+        "notes": data.notes,
+        "created_at": now.isoformat()
+    }
+    
+    await db.qr_handovers.insert_one(handover)
+    
+    # Update vehicle odometer
+    await db.vehicles.update_one(
+        {"vehicle_id": data.vehicle_id},
+        {"$set": {"odometer": data.odometer, "updated_at": now.isoformat()}}
+    )
+    
+    return {
+        "message": "Předávací protokol úspěšně vytvořen",
+        "qr_handover_id": qr_handover_id,
+        "vehicle": f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+    }
 
 # ======================== GPS TRACKER ROUTES ========================
 

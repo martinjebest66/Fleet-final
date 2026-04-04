@@ -82,6 +82,7 @@ class FleetAPITester:
             ("GET", "/fuel", "Get Fuel Entries"),
             ("GET", "/damages", "Get Damage Reports"),
             ("GET", "/handovers", "Get Handovers"),
+            ("GET", "/qr-handovers", "Get QR Handovers"),
             ("GET", "/reports/dashboard", "Dashboard Stats"),
             ("GET", "/gps/trips", "GPS Trips")
         ]
@@ -285,6 +286,160 @@ class FleetAPITester:
             self.log_test("Public Damage Report Structure", False, f"Exception: {str(e)}")
             return False
 
+    def test_qr_handover_endpoints(self) -> bool:
+        """Test QR handover specific endpoints"""
+        all_passed = True
+        
+        # Test public vehicle endpoint with handover QR code
+        try:
+            response = self.session.get(f"{self.base_url}/public/vehicle/handover_veh_test123")
+            # Should return 404 for non-existent vehicle, but endpoint should exist
+            success = response.status_code in [404, 200]
+            details = f"Status: {response.status_code}"
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('qr_type') == 'handover':
+                    details += ", QR type: handover ✓"
+                else:
+                    success = False
+                    details += f", QR type: {data.get('qr_type')} (expected: handover)"
+            self.log_test("Public Vehicle Handover QR", success, details)
+            if not success:
+                all_passed = False
+        except Exception as e:
+            self.log_test("Public Vehicle Handover QR", False, f"Exception: {str(e)}")
+            all_passed = False
+
+        # Test public QR handover submission endpoint structure
+        try:
+            test_handover = {
+                "vehicle_id": "nonexistent_vehicle",
+                "handler_name": "Test Handler",
+                "handler_type": "převzetí",
+                "odometer": 1000,
+                "fuel_level": 50,
+                "fluid_checks": {
+                    "engine_oil": True,
+                    "coolant": True,
+                    "brake_fluid": True,
+                    "windshield_washer": True,
+                    "other_fluids": True
+                },
+                "photos": [
+                    {"photo_type": "front", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:00:00Z"},
+                    {"photo_type": "rear", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:01:00Z"},
+                    {"photo_type": "left", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:02:00Z"},
+                    {"photo_type": "right", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:03:00Z"},
+                    {"photo_type": "interior", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:04:00Z"},
+                    {"photo_type": "dashboard", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:05:00Z"}
+                ]
+            }
+            response = self.session.post(f"{self.base_url}/public/qr-handover", json=test_handover)
+            # Should return 404 (vehicle not found) not 401 (auth required) or 422 (validation error)
+            success = response.status_code == 404
+            self.log_test("Public QR Handover Structure", success, f"Status: {response.status_code}")
+            if not success:
+                all_passed = False
+        except Exception as e:
+            self.log_test("Public QR Handover Structure", False, f"Exception: {str(e)}")
+            all_passed = False
+
+        # Test QR handover validation - missing photos
+        try:
+            test_handover_incomplete = {
+                "vehicle_id": "nonexistent_vehicle",
+                "handler_name": "Test Handler",
+                "handler_type": "převzetí",
+                "odometer": 1000,
+                "fuel_level": 50,
+                "fluid_checks": {
+                    "engine_oil": True,
+                    "coolant": True,
+                    "brake_fluid": True,
+                    "windshield_washer": True,
+                    "other_fluids": True
+                },
+                "photos": [
+                    {"photo_type": "front", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:00:00Z"}
+                ]  # Missing 5 required photos
+            }
+            response = self.session.post(f"{self.base_url}/public/qr-handover", json=test_handover_incomplete)
+            # Should return 400 for missing photos (validation error)
+            success = response.status_code == 400
+            details = f"Status: {response.status_code}"
+            if success and response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    if "Chybí požadované fotografie" in error_data.get('detail', ''):
+                        details += ", Validation: Missing photos detected ✓"
+                    else:
+                        details += f", Error: {error_data.get('detail', 'Unknown')}"
+                except:
+                    pass
+            self.log_test("QR Handover Photo Validation", success, details)
+            if not success:
+                all_passed = False
+        except Exception as e:
+            self.log_test("QR Handover Photo Validation", False, f"Exception: {str(e)}")
+            all_passed = False
+
+        # Test QR handover validation - incomplete fluid checks
+        try:
+            test_handover_incomplete_fluids = {
+                "vehicle_id": "nonexistent_vehicle",
+                "handler_name": "Test Handler",
+                "handler_type": "převzetí",
+                "odometer": 1000,
+                "fuel_level": 50,
+                "fluid_checks": {
+                    "engine_oil": True,
+                    "coolant": False,  # Not checked
+                    "brake_fluid": True,
+                    "windshield_washer": True,
+                    "other_fluids": True
+                },
+                "photos": [
+                    {"photo_type": "front", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:00:00Z"},
+                    {"photo_type": "rear", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:01:00Z"},
+                    {"photo_type": "left", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:02:00Z"},
+                    {"photo_type": "right", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:03:00Z"},
+                    {"photo_type": "interior", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:04:00Z"},
+                    {"photo_type": "dashboard", "photo_url": "data:image/jpeg;base64,test", "timestamp": "2024-01-01T10:05:00Z"}
+                ]
+            }
+            response = self.session.post(f"{self.base_url}/public/qr-handover", json=test_handover_incomplete_fluids)
+            # Should return 400 for incomplete fluid checks
+            success = response.status_code == 400
+            details = f"Status: {response.status_code}"
+            if success and response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    if "provozní kapaliny musí být zkontrolovány" in error_data.get('detail', ''):
+                        details += ", Validation: Fluid checks validation ✓"
+                    else:
+                        details += f", Error: {error_data.get('detail', 'Unknown')}"
+                except:
+                    pass
+            self.log_test("QR Handover Fluid Validation", success, details)
+            if not success:
+                all_passed = False
+        except Exception as e:
+            self.log_test("QR Handover Fluid Validation", False, f"Exception: {str(e)}")
+            all_passed = False
+
+        # Test auth-required QR handover list endpoint
+        try:
+            response = self.session.get(f"{self.base_url}/qr-handovers")
+            success = response.status_code == 401  # Should require auth
+            self.log_test("QR Handovers List Auth", success, f"Status: {response.status_code}")
+            if not success:
+                all_passed = False
+        except Exception as e:
+            self.log_test("QR Handovers List Auth", False, f"Exception: {str(e)}")
+            all_passed = False
+
+        return all_passed
+
     def run_all_tests(self) -> Dict[str, Any]:
         """Run all backend API tests"""
         print("🚀 Starting Fleet Management API Tests")
@@ -300,6 +455,10 @@ class FleetAPITester:
         self.test_public_endpoints()
         self.test_public_fuel_entry_structure()
         self.test_public_damage_report_structure()
+        
+        # Test QR handover endpoints
+        print("\n🤝 Testing QR Handover Endpoints...")
+        self.test_qr_handover_endpoints()
         
         # Test auth-required endpoints
         print("\n🔒 Testing Auth-Required Endpoints...")
