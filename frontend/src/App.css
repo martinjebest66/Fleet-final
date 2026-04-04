@@ -1,34 +1,273 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
-}
+/* Fleet Management App - Custom Styles */
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
-}
-
-.App-header {
-    background-color: #0f0f10;
+/* Sidebar styles */
+.sidebar {
+    width: 260px;
     min-height: 100vh;
+    background: #FFFFFF;
+    border-right: 1px solid #E4E4E7;
+}
+
+.sidebar-link {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+    gap: 12px;
+    padding: 12px 16px;
+    color: #52525B;
+    text-decoration: none;
+    transition: all 200ms;
+    border-radius: 6px;
+    margin: 2px 8px;
 }
 
-.App-link {
-    color: #61dafb;
+.sidebar-link:hover {
+    background: #F4F4F5;
+    color: #18181B;
 }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
+.sidebar-link.active {
+    background: #002FA7;
+    color: #FFFFFF;
+}
+
+.sidebar-link.active:hover {
+    background: #002480;
+}
+
+/* Main content area */
+.main-content {
+    flex: 1;
+    min-height: 100vh;
+    background: #F4F4F5;
+}
+
+/* Dashboard KPI cards */
+.kpi-card {
+    background: #FFFFFF;
+    border: 1px solid #E4E4E7;
+    padding: 24px;
+    transition: all 200ms;
+}
+
+.kpi-card:hover {
+    transform: translateY(-1px);
+    border-color: #A1A1AA;
+}
+
+.kpi-value {
+    font-family: 'Manrope', sans-serif;
+    font-size: 2rem;
+    font-weight: 800;
+    color: #18181B;
+    line-height: 1;
+}
+
+.kpi-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: #52525B;
+    margin-top: 8px;
+}
+
+/* Data tables */
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.data-table th {
+    text-align: left;
+    padding: 12px 16px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #52525B;
+    border-bottom: 1px solid #E4E4E7;
+    background: #F4F4F5;
+}
+
+.data-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid #E4E4E7;
+    font-size: 0.875rem;
+}
+
+.data-table tbody tr:hover {
+    background: #F4F4F5;
+}
+
+/* Status badges */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.badge-success {
+    background: #DCFCE7;
+    color: #166534;
+}
+
+.badge-warning {
+    background: #FEF3C7;
+    color: #92400E;
+}
+
+.badge-danger {
+    background: #FEE2E2;
+    color: #991B1B;
+}
+
+.badge-info {
+    background: #DBEAFE;
+    color: #1E40AF;
+}
+
+/* Form styles */
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-label {
+    display: block;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #18181B;
+    margin-bottom: 6px;
+}
+
+.form-input {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid #E4E4E7;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    transition: all 200ms;
+}
+
+.form-input:focus {
+    border-color: #002FA7;
+    box-shadow: 0 0 0 3px rgba(0, 47, 167, 0.1);
+}
+
+/* Primary button */
+.btn-primary {
+    background: #002FA7;
+    color: #FFFFFF;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-weight: 600;
+    transition: all 200ms;
+    border: none;
+    cursor: pointer;
+}
+
+.btn-primary:hover {
+    background: #002480;
+}
+
+.btn-primary:active {
+    transform: scale(0.98);
+}
+
+/* Secondary button */
+.btn-secondary {
+    background: #FFFFFF;
+    color: #18181B;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-weight: 600;
+    transition: all 200ms;
+    border: 1px solid #E4E4E7;
+    cursor: pointer;
+}
+
+.btn-secondary:hover {
+    background: #F4F4F5;
+}
+
+/* QR Code styles */
+.qr-code-container {
+    background: #FFFFFF;
+    padding: 24px;
+    border-radius: 8px;
+    display: inline-block;
+}
+
+/* Mobile form container */
+.mobile-form-container {
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+/* Map container */
+.map-container {
+    width: 100%;
+    height: 400px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #E4E4E7;
+}
+
+/* Loading spinner */
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #E4E4E7;
+    border-top-color: #002FA7;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
     to {
         transform: rotate(360deg);
+    }
+}
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: #52525B;
+}
+
+.empty-state-icon {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 20px;
+    color: #A1A1AA;
+}
+
+/* Chart container */
+.chart-container {
+    background: #FFFFFF;
+    border: 1px solid #E4E4E7;
+    padding: 24px;
+    border-radius: 8px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .sidebar {
+        display: none;
+    }
+    
+    .kpi-value {
+        font-size: 1.5rem;
+    }
+    
+    .data-table {
+        display: block;
+        overflow-x: auto;
     }
 }
