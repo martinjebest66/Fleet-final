@@ -34,17 +34,26 @@ Create a fleet management app for a small driving school with vehicle management
 - [x] Dashboard with KPIs and charts
 - [x] Reports with custom date ranges
 
-## What's Been Implemented (2026-04-04)
+## What's Been Implemented
 1. **Authentication**: Google OAuth via Emergent Auth
-2. **Vehicle Management**: Full CRUD, QR code generation for fuel/damage
+2. **Vehicle Management**: Full CRUD, QR code generation for fuel/damage/handover
 3. **Instructor Management**: Full CRUD with vehicle assignment
 4. **Logbook (Kniha jízd)**: Manual entry, GPS sync, CSV export
 5. **Fuel Entries**: Admin form + public QR code mobile form
 6. **Damage Reports**: Admin form + public QR code mobile form with photo upload
-7. **Handover Protocols**: Vehicle condition documentation with photos
+7. **Handover Protocols**: Vehicle condition with fluid checks, 6-step photo capture
 8. **GPS Tracking**: Mock data import, trip list, map visualization
 9. **Reports**: Kilometer statistics with charts, vehicle breakdown
 10. **Dashboard**: KPIs, charts, vehicle status, recent trips
+
+## Code Quality Fixes (2026-04-04)
+- [x] React Hook dependencies: All useEffect/useCallback properly configured
+- [x] Array index keys replaced with unique string keys
+- [x] Inline chart objects extracted to module-level constants
+- [x] use-toast.js useEffect dependency fixed
+- [x] useMemo placement before early returns
+- [x] Vehicles.jsx useCallback syntax fixed
+- [x] Backend random module replaced with secrets
 
 ## P0 Features (Critical - Done)
 - [x] Authentication
@@ -58,6 +67,11 @@ Create a fleet management app for a small driving school with vehicle management
 - [x] Map visualization
 - [x] Reports with date ranges
 
+## Remaining Code Quality Tasks
+- [ ] Split PublicHandoverForm.jsx (557 lines) into smaller components
+- [ ] Split Vehicles.jsx (491 lines) into smaller components
+- [ ] Backend function decomposition (server.py complex functions)
+
 ## P2 Features (Nice to have - Backlog)
 - [ ] Real Teltonika FMB003 integration
 - [ ] PDF export for logbook
@@ -66,9 +80,3 @@ Create a fleet management app for a small driving school with vehicle management
 - [ ] Instructor login (separate from admin)
 - [ ] Fuel consumption analytics
 - [ ] Vehicle maintenance scheduling
-
-## Next Tasks
-1. Test full user flow with real Google OAuth
-2. Add sample data for demo
-3. Consider PDF export for official logbook format
-4. Add fuel consumption calculation per vehicle
