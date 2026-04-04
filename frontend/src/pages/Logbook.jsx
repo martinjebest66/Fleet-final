@@ -16,7 +16,7 @@ export default function Logbook() {
   const [instructors, setInstructors] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
-  const [filters, setFilters] = useState({ vehicle_id: "", instructor_id: "", date_from: "", date_to: "" });
+  const [filters, setFilters] = useState({ vehicle_id: "all", instructor_id: "all", date_from: "", date_to: "" });
   const [formData, setFormData] = useState({
     vehicle_id: "", instructor_id: "", date: format(new Date(), "yyyy-MM-dd"),
     start_time: "08:00", end_time: "09:00", start_location: "", end_location: "",
@@ -28,8 +28,8 @@ export default function Logbook() {
   const fetchData = async () => {
     try {
       const params = new URLSearchParams();
-      if (filters.vehicle_id) params.append("vehicle_id", filters.vehicle_id);
-      if (filters.instructor_id) params.append("instructor_id", filters.instructor_id);
+      if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
+      if (filters.instructor_id && filters.instructor_id !== "all") params.append("instructor_id", filters.instructor_id);
       if (filters.date_from) params.append("date_from", filters.date_from);
       if (filters.date_to) params.append("date_to", filters.date_to);
 
@@ -111,7 +111,7 @@ export default function Logbook() {
             <Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}>
               <SelectTrigger><SelectValue placeholder="Všechna vozidla" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Všechna</SelectItem>
+                <SelectItem value="all">Všechna</SelectItem>
                 {vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}
               </SelectContent>
             </Select>
@@ -121,14 +121,14 @@ export default function Logbook() {
             <Select value={filters.instructor_id} onValueChange={(v) => setFilters({ ...filters, instructor_id: v })}>
               <SelectTrigger><SelectValue placeholder="Všichni" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Všichni</SelectItem>
+                <SelectItem value="all">Všichni</SelectItem>
                 {instructors.map(i => <SelectItem key={i.instructor_id} value={i.instructor_id}>{i.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
           <div><Label>Od</Label><Input type="date" value={filters.date_from} onChange={(e) => setFilters({ ...filters, date_from: e.target.value })} /></div>
           <div><Label>Do</Label><Input type="date" value={filters.date_to} onChange={(e) => setFilters({ ...filters, date_to: e.target.value })} /></div>
-          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "", instructor_id: "", date_from: "", date_to: "" })} className="w-full">Vymazat</Button></div>
+          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "all", instructor_id: "all", date_from: "", date_to: "" })} className="w-full">Vymazat</Button></div>
         </div>
       </div>
 
@@ -174,7 +174,7 @@ export default function Logbook() {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div><Label>Vozidlo *</Label><Select value={formData.vehicle_id} onValueChange={handleVehicleChange}><SelectTrigger><SelectValue placeholder="Vyberte" /></SelectTrigger><SelectContent>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model} ({v.registration_plate})</SelectItem>)}</SelectContent></Select></div>
-              <div><Label>Instruktor</Label><Select value={formData.instructor_id} onValueChange={(v) => setFormData({ ...formData, instructor_id: v })}><SelectTrigger><SelectValue placeholder="Vyberte" /></SelectTrigger><SelectContent><SelectItem value="">Bez instruktora</SelectItem>{instructors.map(i => <SelectItem key={i.instructor_id} value={i.instructor_id}>{i.name}</SelectItem>)}</SelectContent></Select></div>
+              <div><Label>Instruktor</Label><Select value={formData.instructor_id || "none"} onValueChange={(v) => setFormData({ ...formData, instructor_id: v === "none" ? "" : v })}><SelectTrigger><SelectValue placeholder="Vyberte" /></SelectTrigger><SelectContent><SelectItem value="none">Bez instruktora</SelectItem>{instructors.map(i => <SelectItem key={i.instructor_id} value={i.instructor_id}>{i.name}</SelectItem>)}</SelectContent></Select></div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div><Label>Datum *</Label><Input type="date" value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} required /></div>

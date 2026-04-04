@@ -18,7 +18,7 @@ export default function Handovers() {
   const [showModal, setShowModal] = useState(false);
   const [showViewModal, setShowViewModal] = useState(false);
   const [selectedProtocol, setSelectedProtocol] = useState(null);
-  const [filters, setFilters] = useState({ vehicle_id: "", instructor_id: "" });
+  const [filters, setFilters] = useState({ vehicle_id: "all", instructor_id: "all" });
   const [formData, setFormData] = useState({
     vehicle_id: "", instructor_id: "", type: "převzetí", odometer: 0, fuel_level: 100,
     exterior_condition: "", interior_condition: "", damages_noted: [], photos: [], notes: ""
@@ -29,8 +29,8 @@ export default function Handovers() {
   const fetchData = async () => {
     try {
       const params = new URLSearchParams();
-      if (filters.vehicle_id) params.append("vehicle_id", filters.vehicle_id);
-      if (filters.instructor_id) params.append("instructor_id", filters.instructor_id);
+      if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
+      if (filters.instructor_id && filters.instructor_id !== "all") params.append("instructor_id", filters.instructor_id);
       const [protocolsRes, vehiclesRes, instructorsRes] = await Promise.all([
         axios.get(`${API}/handovers?${params}`, { withCredentials: true }),
         axios.get(`${API}/vehicles`, { withCredentials: true }),
@@ -91,9 +91,9 @@ export default function Handovers() {
 
       <div className="bg-white border border-[#E4E4E7] rounded-md p-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div><Label>Vozidlo</Label><Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}><SelectTrigger><SelectValue placeholder="Všechna" /></SelectTrigger><SelectContent><SelectItem value="">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent></Select></div>
-          <div><Label>Instruktor</Label><Select value={filters.instructor_id} onValueChange={(v) => setFilters({ ...filters, instructor_id: v })}><SelectTrigger><SelectValue placeholder="Všichni" /></SelectTrigger><SelectContent><SelectItem value="">Všichni</SelectItem>{instructors.map(i => <SelectItem key={i.instructor_id} value={i.instructor_id}>{i.name}</SelectItem>)}</SelectContent></Select></div>
-          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "", instructor_id: "" })} className="w-full">Vymazat</Button></div>
+          <div><Label>Vozidlo</Label><Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}><SelectTrigger><SelectValue placeholder="Všechna" /></SelectTrigger><SelectContent><SelectItem value="all">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent></Select></div>
+          <div><Label>Instruktor</Label><Select value={filters.instructor_id} onValueChange={(v) => setFilters({ ...filters, instructor_id: v })}><SelectTrigger><SelectValue placeholder="Všichni" /></SelectTrigger><SelectContent><SelectItem value="all">Všichni</SelectItem>{instructors.map(i => <SelectItem key={i.instructor_id} value={i.instructor_id}>{i.name}</SelectItem>)}</SelectContent></Select></div>
+          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "all", instructor_id: "all" })} className="w-full">Vymazat</Button></div>
         </div>
       </div>
 

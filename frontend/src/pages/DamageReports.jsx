@@ -25,8 +25,8 @@ export default function DamageReports() {
   const fetchData = async () => {
     try {
       const params = new URLSearchParams();
-      if (filters.vehicle_id) params.append("vehicle_id", filters.vehicle_id);
-      if (filters.status) params.append("status", filters.status);
+      if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
+      if (filters.status && filters.status !== "all") params.append("status", filters.status);
       const [reportsRes, vehiclesRes] = await Promise.all([
         axios.get(`${API}/damages?${params}`, { withCredentials: true }),
         axios.get(`${API}/vehicles`, { withCredentials: true })
@@ -86,9 +86,9 @@ export default function DamageReports() {
 
       <div className="bg-white border border-[#E4E4E7] rounded-md p-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div><Label>Vozidlo</Label><Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}><SelectTrigger><SelectValue placeholder="Všechna" /></SelectTrigger><SelectContent><SelectItem value="">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent></Select></div>
-          <div><Label>Status</Label><Select value={filters.status} onValueChange={(v) => setFilters({ ...filters, status: v })}><SelectTrigger><SelectValue placeholder="Všechny" /></SelectTrigger><SelectContent><SelectItem value="">Všechny</SelectItem><SelectItem value="otevřeno">Otevřeno</SelectItem><SelectItem value="v řešení">V řešení</SelectItem><SelectItem value="vyřešeno">Vyřešeno</SelectItem></SelectContent></Select></div>
-          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "", status: "" })} className="w-full">Vymazat</Button></div>
+          <div><Label>Vozidlo</Label><Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}><SelectTrigger><SelectValue placeholder="Všechna" /></SelectTrigger><SelectContent><SelectItem value="all">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent></Select></div>
+          <div><Label>Status</Label><Select value={filters.status} onValueChange={(v) => setFilters({ ...filters, status: v })}><SelectTrigger><SelectValue placeholder="Všechny" /></SelectTrigger><SelectContent><SelectItem value="all">Všechny</SelectItem><SelectItem value="otevřeno">Otevřeno</SelectItem><SelectItem value="v řešení">V řešení</SelectItem><SelectItem value="vyřešeno">Vyřešeno</SelectItem></SelectContent></Select></div>
+          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "all", status: "all" })} className="w-full">Vymazat</Button></div>
         </div>
       </div>
 

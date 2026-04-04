@@ -30,7 +30,7 @@ export default function GPSTracking() {
 
   const fetchData = async () => {
     try {
-      const params = selectedVehicle ? `?vehicle_id=${selectedVehicle}` : "";
+      const params = selectedVehicle && selectedVehicle !== "all" ? `?vehicle_id=${selectedVehicle}` : "";
       const [tripsRes, vehiclesRes] = await Promise.all([
         axios.get(`${API}/gps/trips${params}`, { withCredentials: true }),
         axios.get(`${API}/vehicles`, { withCredentials: true })
@@ -88,11 +88,11 @@ export default function GPSTracking() {
           <Select value={selectedVehicle} onValueChange={setSelectedVehicle}>
             <SelectTrigger className="w-48"><SelectValue placeholder="Vyberte vozidlo" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="">Všechna vozidla</SelectItem>
+              <SelectItem value="all">Všechna vozidla</SelectItem>
               {vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}
             </SelectContent>
           </Select>
-          <Button onClick={() => handleImportMock(selectedVehicle || vehicles[0]?.vehicle_id)} className="bg-[#002FA7] hover:bg-[#002480]" disabled={importing || vehicles.length === 0}>
+          <Button onClick={() => handleImportMock(selectedVehicle !== "all" ? selectedVehicle : vehicles[0]?.vehicle_id)} className="bg-[#002FA7] hover:bg-[#002480]" disabled={importing || vehicles.length === 0}>
             <Download size={20} className="mr-2" />{importing ? "Importuji..." : "Import GPS"}
           </Button>
         </div>

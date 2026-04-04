@@ -42,7 +42,7 @@ export default function Reports() {
       const params = new URLSearchParams();
       params.append("date_from", filters.date_from);
       params.append("date_to", filters.date_to);
-      if (filters.vehicle_id) params.append("vehicle_id", filters.vehicle_id);
+      if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
       const res = await axios.get(`${API}/reports/km-stats?${params}`, { withCredentials: true });
       setStats(res.data);
     } catch (error) { toast.error("Nepodařilo se načíst statistiky"); }
@@ -101,10 +101,10 @@ export default function Reports() {
           <div><Label>Vozidlo</Label>
             <Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}>
               <SelectTrigger><SelectValue placeholder="Všechna" /></SelectTrigger>
-              <SelectContent><SelectItem value="">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent>
+              <SelectContent><SelectItem value="all">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent>
             </Select>
           </div>
-          <div className="flex items-end"><Button variant="outline" onClick={() => { setFilters({ vehicle_id: "", date_from: format(subDays(new Date(), 30), "yyyy-MM-dd"), date_to: format(new Date(), "yyyy-MM-dd"), preset: "month" }); }} className="w-full">Reset</Button></div>
+          <div className="flex items-end"><Button variant="outline" onClick={() => { setFilters({ vehicle_id: "all", date_from: format(subDays(new Date(), 30), "yyyy-MM-dd"), date_to: format(new Date(), "yyyy-MM-dd"), preset: "month" }); }} className="w-full">Reset</Button></div>
         </div>
       </div>
 

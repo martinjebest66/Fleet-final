@@ -15,7 +15,7 @@ export default function FuelEntries() {
   const [vehicles, setVehicles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
-  const [filters, setFilters] = useState({ vehicle_id: "", date_from: "", date_to: "" });
+  const [filters, setFilters] = useState({ vehicle_id: "all", date_from: "", date_to: "" });
   const [formData, setFormData] = useState({
     vehicle_id: "", date: format(new Date(), "yyyy-MM-dd"), odometer: 0, liters: 0, price_per_liter: 38.90, total_price: 0, fuel_station: "", notes: ""
   });
@@ -93,10 +93,10 @@ export default function FuelEntries() {
 
       <div className="bg-white border border-[#E4E4E7] rounded-md p-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div><Label>Vozidlo</Label><Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}><SelectTrigger><SelectValue placeholder="Všechna" /></SelectTrigger><SelectContent><SelectItem value="">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent></Select></div>
+          <div><Label>Vozidlo</Label><Select value={filters.vehicle_id} onValueChange={(v) => setFilters({ ...filters, vehicle_id: v })}><SelectTrigger><SelectValue placeholder="Všechna" /></SelectTrigger><SelectContent><SelectItem value="all">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent></Select></div>
           <div><Label>Od</Label><Input type="date" value={filters.date_from} onChange={(e) => setFilters({ ...filters, date_from: e.target.value })} /></div>
           <div><Label>Do</Label><Input type="date" value={filters.date_to} onChange={(e) => setFilters({ ...filters, date_to: e.target.value })} /></div>
-          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "", date_from: "", date_to: "" })} className="w-full">Vymazat</Button></div>
+          <div className="flex items-end"><Button variant="outline" onClick={() => setFilters({ vehicle_id: "all", date_from: "", date_to: "" })} className="w-full">Vymazat</Button></div>
         </div>
       </div>
 

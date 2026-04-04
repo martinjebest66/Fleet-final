@@ -370,14 +370,14 @@ export default function Vehicles() {
             <div>
               <Label htmlFor="instructor">Přiřazený instruktor</Label>
               <Select
-                value={formData.assigned_instructor_id}
-                onValueChange={(value) => setFormData({ ...formData, assigned_instructor_id: value })}
+                value={formData.assigned_instructor_id || "none"}
+                onValueChange={(value) => setFormData({ ...formData, assigned_instructor_id: value === "none" ? "" : value })}
               >
                 <SelectTrigger data-testid="vehicle-instructor-select">
                   <SelectValue placeholder="Vyberte instruktora" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Bez instruktora</SelectItem>
+                  <SelectItem value="none">Bez instruktora</SelectItem>
                   {instructors.map((instructor) => (
                     <SelectItem key={instructor.instructor_id} value={instructor.instructor_id}>
                       {instructor.name}
