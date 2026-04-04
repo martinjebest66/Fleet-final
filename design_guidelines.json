@@ -1,0 +1,80 @@
+{
+  "theme": "light",
+  "archetype": "Archetype 4 (Swiss & High-Contrast)",
+  "design_philosophy": "Color is Function Only. 95% of the UI must be monochrome to project authority and precision. Color exists strictly to guide action. High contrast, clean data presentation for fleet admins, minimal friction for mobile QR code workflows.",
+  "colors": {
+    "background": "#FFFFFF",
+    "surface_1": "#F4F4F5",
+    "surface_2": "#E4E4E7",
+    "primary": "#002FA7",
+    "primary_hover": "#002480",
+    "text_main": "#18181B",
+    "text_muted": "#52525B",
+    "functional": {
+      "success": "#16A34A",
+      "warning": "#FFC000",
+      "danger": "#FF2400",
+      "info": "#002FA7"
+    },
+    "border": "#E4E4E7"
+  },
+  "typography": {
+    "heading_font": "Manrope",
+    "body_font": "IBM Plex Sans",
+    "scale": {
+      "h1": "text-4xl tracking-tighter font-black text-[#18181B]",
+      "h2": "text-2xl tracking-tight font-bold text-[#18181B]",
+      "h3": "text-xl tracking-tight font-semibold text-[#18181B]",
+      "h4": "text-lg font-semibold text-[#18181B]",
+      "body": "text-base leading-relaxed text-[#52525B]",
+      "small": "text-sm text-[#52525B]",
+      "overline": "text-xs font-bold uppercase tracking-[0.2em] text-[#52525B]"
+    }
+  },
+  "layout_and_spacing": {
+    "dashboard_grid": "Grid cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6. Use Control Room Grid.",
+    "spacing_scale": "p-4, p-6, p-8. Containers with borders MUST have p-6 minimum internally.",
+    "alignment": "Left-align for data, tables, inputs. Center-align only for empty states or hero headers.",
+    "mobile_constraints": "QR scanner flows MUST be mobile-first layout. Use max-h-[80vh] for any images on mobile."
+  },
+  "components_instructions": {
+    "cards": "Go cardless or flat rectangular with 1px border (#E4E4E7). NO soft shadows. Hover: -translate-y-[1px] and border darkens to #A1A1AA.",
+    "tables": "Use Shadcn Table. Dense rows (py-2). Use clear border-b to separate rows. Perfect for Kniha jízd.",
+    "buttons": "Square or rounded-sm. Primary button: bg-[#002FA7] text-white hover:bg-[#002480] hover:text-white. Secondary: bg-white border border-[#E4E4E7] text-[#18181B] hover:bg-[#F4F4F5] hover:text-[#18181B].",
+    "inputs": "Shadcn input/form components. Focus state must have HIGHER contrast: focus:ring-2 focus:ring-[#002FA7] focus:ring-offset-1.",
+    "navigation": "Left sidebar for desktop admin. Bottom navigation or simple top header for mobile driver interface."
+  },
+  "motion": {
+    "hover": "transition-colors duration-200, transition-transform duration-200",
+    "interactive": "Active states scale down slightly (scale: 0.98)."
+  },
+  "iconography_and_assets": {
+    "icon_library": "@phosphor-icons/react",
+    "installation_command": "yarn add @phosphor-icons/react",
+    "images": {
+      "login_background": {
+        "url": "https://images.unsplash.com/photo-1504366130991-154787072d46?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBjYXJ8ZW58MHx8fHwxNzc1MjkxNDQzfDA&ixlib=rb-4.1.0&q=85",
+        "description": "White BMW coupe near man and buildings. Use for login background."
+      },
+      "map_placeholder": {
+        "url": "https://images.unsplash.com/photo-1520299607509-dcd935f9a839?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHwzfHxtYXB8ZW58MHx8fHwxNzc1MjkxNDQzfDA&ixlib=rb-4.1.0&q=85",
+        "description": "Map illustration to use as a fallback if Map GL fails or as empty state background."
+      },
+      "vehicle_placeholder": {
+        "url": "https://images.unsplash.com/photo-1616932321030-16411c3a6489?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBjYXJ8ZW58MHx8fHwxNzc1MjkxNDQzfDA&ixlib=rb-4.1.0&q=85",
+        "description": "White car for vehicle thumbnail placeholders."
+      }
+    }
+  },
+  "special_views_and_features": {
+    "kniha_jizd": "Driving logbook needs a highly scannable, dense data table. Incorporate search, filter, and date-range pickers using Shadcn components.",
+    "qr_scan_flow": "Mobile-optimized 'Camera overlay' UI. Big typography, clear constraints, dark background for camera viewfinder. Form should auto-fill based on QR ID.",
+    "damage_reporting": "Use cardless flat forms for damage reporting. Include prominent photo upload areas and handover protocol (takeover condition) checkboxes.",
+    "gps_tracking": "Integrate OpenStreetMap. UI overlay over map must use Glassmorphism (bg-white/70 backdrop-blur-xl border border-white/20).",
+    "admin_dashboard": "Use Control Room Grid. Key KPIs: Total km, active vehicles, unresolved damages, fuel cost. Use Shadcn chart/Recharts for trends."
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure minimum 4.5:1 for standard text. All text over images must have drop-shadow or overlay.",
+    "testing_attributes": "All interactive elements MUST include data-testid. E.g., data-testid='vehicle-add-button'."
+  }
+}
