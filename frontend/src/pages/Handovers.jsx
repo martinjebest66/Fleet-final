@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { Handshake, Plus, Eye, Camera, Car } from "@phosphor-icons/react";
@@ -24,9 +24,7 @@ export default function Handovers() {
     exterior_condition: "", interior_condition: "", damages_noted: [], photos: [], notes: ""
   });
 
-  useEffect(() => { fetchData(); }, [filters]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
@@ -41,7 +39,9 @@ export default function Handovers() {
       setInstructors(instructorsRes.data);
     } catch (error) { toast.error("Nepodařilo se načíst protokoly"); } 
     finally { setLoading(false); }
-  };
+  }, [filters]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -120,7 +120,7 @@ export default function Handovers() {
               </div>
               {p.photos?.length > 0 && (
                 <div className="mt-4 flex gap-2">
-                  {p.photos.slice(0, 3).map((photo, i) => <img key={i} src={photo} alt="" className="w-16 h-16 object-cover rounded-md border" />)}
+                  {p.photos.slice(0, 3).map((photo) => <img key={`thumb-${photo}`} src={photo} alt="" className="w-16 h-16 object-cover rounded-md border" />)}
                   {p.photos.length > 3 && <div className="w-16 h-16 bg-[#F4F4F5] rounded-md flex items-center justify-center text-sm">+{p.photos.length - 3}</div>}
                 </div>
               )}
@@ -154,7 +154,7 @@ export default function Handovers() {
             <div><Label>Stav exteriéru *</Label><Textarea value={formData.exterior_condition} onChange={(e) => setFormData({ ...formData, exterior_condition: e.target.value })} required rows={2} placeholder="Popište stav karoserie..." /></div>
             <div><Label>Stav interiéru *</Label><Textarea value={formData.interior_condition} onChange={(e) => setFormData({ ...formData, interior_condition: e.target.value })} required rows={2} placeholder="Popište stav interiéru..." /></div>
             <div><Label>Fotografie</Label><Input type="file" accept="image/*" multiple onChange={handlePhotoUpload} />
-              {formData.photos.length > 0 && <div className="flex gap-2 mt-2 flex-wrap">{formData.photos.map((p, i) => <img key={i} src={p} alt="" className="w-16 h-16 object-cover rounded-md border" />)}</div>}
+              {formData.photos.length > 0 && <div className="flex gap-2 mt-2 flex-wrap">{formData.photos.map((p) => <img key={`form-${p}`} src={p} alt="" className="w-16 h-16 object-cover rounded-md border" />)}</div>}
             </div>
             <div><Label>Poznámky</Label><Textarea value={formData.notes} onChange={(e) => setFormData({ ...formData, notes: e.target.value })} rows={2} /></div>
             <DialogFooter><Button type="button" variant="outline" onClick={() => setShowModal(false)}>Zrušit</Button><Button type="submit" className="bg-[#002FA7] hover:bg-[#002480]" disabled={!formData.vehicle_id || !formData.instructor_id}>Vytvořit</Button></DialogFooter>
@@ -182,7 +182,7 @@ export default function Handovers() {
               <div><p className="text-sm text-[#52525B]">Stav exteriéru</p><p className="font-medium">{selectedProtocol.exterior_condition}</p></div>
               <div><p className="text-sm text-[#52525B]">Stav interiéru</p><p className="font-medium">{selectedProtocol.interior_condition}</p></div>
               {selectedProtocol.notes && <div><p className="text-sm text-[#52525B]">Poznámky</p><p className="font-medium">{selectedProtocol.notes}</p></div>}
-              {selectedProtocol.photos?.length > 0 && <div><p className="text-sm text-[#52525B] mb-2">Fotografie</p><div className="grid grid-cols-2 gap-2">{selectedProtocol.photos.map((p, i) => <img key={i} src={p} alt="" className="w-full h-40 object-cover rounded-md border" />)}</div></div>}
+              {selectedProtocol.photos?.length > 0 && <div><p className="text-sm text-[#52525B] mb-2">Fotografie</p><div className="grid grid-cols-2 gap-2">{selectedProtocol.photos.map((p) => <img key={`view-${p}`} src={p} alt="" className="w-full h-40 object-cover rounded-md border" />)}</div></div>}
             </div>
           )}
         </DialogContent>

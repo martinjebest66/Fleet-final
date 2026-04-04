@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { GasPump, Check, Car } from "@phosphor-icons/react";
@@ -27,11 +27,7 @@ export default function PublicFuelForm() {
     notes: ""
   });
 
-  useEffect(() => {
-    fetchVehicle();
-  }, [qrCode]);
-
-  const fetchVehicle = async () => {
+  const fetchVehicle = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/public/vehicle/${qrCode}`);
       setVehicle(res.data);
@@ -41,7 +37,11 @@ export default function PublicFuelForm() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [qrCode]);
+
+  useEffect(() => {
+    fetchVehicle();
+  }, [fetchVehicle]);
 
   const handleLitersChange = (liters) => {
     setFormData({

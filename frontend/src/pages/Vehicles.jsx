@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { Car, Plus, Pencil, Trash, QrCode, X, Handshake } from "@phosphor-icons/react";
+import { Car, Plus, Pencil, Trash, QrCode, Handshake } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -33,11 +33,7 @@ export default function Vehicles() {
     assigned_instructor_id: ""
   });
 
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const [vehiclesRes, instructorsRes] = await Promise.all([
         axios.get(`${API}/vehicles`, { withCredentials: true }),
@@ -45,12 +41,15 @@ export default function Vehicles() {
       ]);
       setVehicles(vehiclesRes.data);
       setInstructors(instructorsRes.data);
-    } catch (error) {
+    } catch {
       toast.error("Nepodařilo se načíst vozidla");
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
 
   const handleSubmit = async (e) => {
     e.preventDefault();

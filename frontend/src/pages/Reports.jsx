@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { ChartBar, Calendar, Download } from "@phosphor-icons/react";
@@ -9,6 +9,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 import { format, subDays, subMonths, startOfMonth, endOfMonth } from "date-fns";
 import { toast } from "sonner";
+
+const chartTickSmall = { fontSize: 10 };
+const chartTickNormal = { fontSize: 12 };
 
 export default function Reports() {
   const [vehicles, setVehicles] = useState([]);
@@ -21,23 +24,15 @@ export default function Reports() {
     preset: "month"
   });
 
-  useEffect(() => {
-    fetchVehicles();
-  }, []);
-
-  useEffect(() => {
-    if (filters.date_from && filters.date_to) fetchStats();
-  }, [filters]);
-
-  const fetchVehicles = async () => {
+  const fetchVehicles = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/vehicles`, { withCredentials: true });
       setVehicles(res.data);
     } catch (error) { console.error(error); } 
     finally { setLoading(false); }
-  };
+  }, []);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       params.append("date_from", filters.date_from);
@@ -46,7 +41,15 @@ export default function Reports() {
       const res = await axios.get(`${API}/reports/km-stats?${params}`, { withCredentials: true });
       setStats(res.data);
     } catch (error) { toast.error("Nepodařilo se načíst statistiky"); }
-  };
+  }, [filters]);
+
+  useEffect(() => {
+    fetchVehicles();
+  }, [fetchVehicles]);
+
+  useEffect(() => {
+    if (filters.date_from && filters.date_to) fetchStats();
+  }, [filters, fetchStats]);
 
   const handlePresetChange = (preset) => {
     const now = new Date();
@@ -131,8 +134,8 @@ export default function Reports() {
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={stats.daily_stats}>
-                    <XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={(v) => v.slice(5)} />
-                    <YAxis tick={{ fontSize: 12 }} />
+                    <XAxis dataKey="date" tick={chartTickSmall} tickFormatter={(v) => v.slice(5)} />
+                    <YAxis tick={chartTickNormal} />
                     <Tooltip formatter={(v) => [`${v} km`, "Km"]} labelFormatter={(l) => `Datum: ${l}`} />
                     <Bar dataKey="km" fill="#002FA7" radius={[4, 4, 0, 0]} />
                   </BarChart>
@@ -145,8 +148,8 @@ export default function Reports() {
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={stats.daily_stats}>
-                    <XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={(v) => v.slice(5)} />
-                    <YAxis tick={{ fontSize: 12 }} />
+                    <XAxis dataKey="date" tick={chartTickSmall} tickFormatter={(v) => v.slice(5)} />
+                    <YAxis tick={chartTickNormal} />
                     <Tooltip formatter={(v) => [`${v} km`, "Km"]} />
                     <Line type="monotone" dataKey="km" stroke="#002FA7" strokeWidth={2} dot={false} />
                   </LineChart>

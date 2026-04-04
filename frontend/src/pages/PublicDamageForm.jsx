@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { Warning, Check, Car, Camera, X } from "@phosphor-icons/react";
@@ -27,11 +27,7 @@ export default function PublicDamageForm() {
     notes: ""
   });
 
-  useEffect(() => {
-    fetchVehicle();
-  }, [qrCode]);
-
-  const fetchVehicle = async () => {
+  const fetchVehicle = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/public/vehicle/${qrCode}`);
       setVehicle(res.data);
@@ -40,7 +36,11 @@ export default function PublicDamageForm() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [qrCode]);
+
+  useEffect(() => {
+    fetchVehicle();
+  }, [fetchVehicle]);
 
   const handlePhotoUpload = async (e) => {
     const files = Array.from(e.target.files);
@@ -188,7 +188,7 @@ export default function PublicDamageForm() {
             {formData.photos.length > 0 && (
               <div className="flex gap-2 mt-3 flex-wrap">
                 {formData.photos.map((photo, idx) => (
-                  <div key={idx} className="relative">
+                  <div key={`photo-${photo}`} className="relative">
                     <img
                       src={photo}
                       alt={`Foto ${idx + 1}`}

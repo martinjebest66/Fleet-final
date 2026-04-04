@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { MapPin, Download, Play, ArrowsClockwise, Check } from "@phosphor-icons/react";
@@ -26,9 +26,7 @@ export default function GPSTracking() {
   const [selectedVehicle, setSelectedVehicle] = useState("");
   const [selectedTrip, setSelectedTrip] = useState(null);
 
-  useEffect(() => { fetchData(); }, [selectedVehicle]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const params = selectedVehicle && selectedVehicle !== "all" ? `?vehicle_id=${selectedVehicle}` : "";
       const [tripsRes, vehiclesRes] = await Promise.all([
@@ -39,7 +37,9 @@ export default function GPSTracking() {
       setVehicles(vehiclesRes.data);
     } catch (error) { toast.error("Nepodařilo se načíst GPS data"); } 
     finally { setLoading(false); }
-  };
+  }, [selectedVehicle]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleImportMock = async (vehicleId) => {
     if (!vehicleId) { toast.error("Vyberte vozidlo"); return; }

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { User, Plus, Pencil, Trash, Phone, Envelope } from "@phosphor-icons/react";
@@ -20,9 +20,7 @@ export default function Instructors() {
     name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: []
   });
 
-  useEffect(() => { fetchData(); }, []);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const [instructorsRes, vehiclesRes] = await Promise.all([
         axios.get(`${API}/instructors`, { withCredentials: true }),
@@ -33,7 +31,9 @@ export default function Instructors() {
     } catch (error) {
       toast.error("Nepodařilo se načíst instruktory");
     } finally { setLoading(false); }
-  };
+  }, []);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

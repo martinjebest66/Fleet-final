@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { BookOpen, Plus, Trash, Download, Gps } from "@phosphor-icons/react";
@@ -23,9 +23,7 @@ export default function Logbook() {
     route_description: "", start_odometer: 0, end_odometer: 0, purpose: "výcvik", notes: ""
   });
 
-  useEffect(() => { fetchData(); }, [filters]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
@@ -43,7 +41,9 @@ export default function Logbook() {
       setInstructors(instructorsRes.data);
     } catch (error) { toast.error("Nepodařilo se načíst knihu jízd"); } 
     finally { setLoading(false); }
-  };
+  }, [filters]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

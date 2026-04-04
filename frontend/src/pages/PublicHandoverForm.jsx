@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { Handshake, Check, Car, Camera, ArrowRight, ArrowLeft, X, CheckCircle, Warning } from "@phosphor-icons/react";
@@ -61,11 +61,7 @@ export default function PublicHandoverForm() {
   
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    fetchVehicle();
-  }, [qrCode]);
-
-  const fetchVehicle = async () => {
+  const fetchVehicle = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/public/vehicle/${qrCode}`);
       setVehicle(res.data);
@@ -75,7 +71,11 @@ export default function PublicHandoverForm() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [qrCode]);
+
+  useEffect(() => {
+    fetchVehicle();
+  }, [fetchVehicle]);
 
   const handlePhotoCapture = async (e) => {
     const file = e.target.files?.[0];

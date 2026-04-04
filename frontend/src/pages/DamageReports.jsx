@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { Warning, Plus, Eye, Check, X } from "@phosphor-icons/react";
@@ -20,9 +20,7 @@ export default function DamageReports() {
   const [filters, setFilters] = useState({ vehicle_id: "", status: "" });
   const [formData, setFormData] = useState({ vehicle_id: "", description: "", severity: "střední", location_on_vehicle: "", photos: [], reported_by: "", notes: "" });
 
-  useEffect(() => { fetchData(); }, [filters]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
@@ -35,7 +33,9 @@ export default function DamageReports() {
       setVehicles(vehiclesRes.data);
     } catch (error) { toast.error("Nepodařilo se načíst hlášení"); } 
     finally { setLoading(false); }
-  };
+  }, [filters]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -114,7 +114,7 @@ export default function DamageReports() {
               </div>
               {r.photos?.length > 0 && (
                 <div className="mt-4 flex gap-2">
-                  {r.photos.slice(0, 3).map((p, i) => <img key={i} src={p} alt="" className="w-16 h-16 object-cover rounded-md border" />)}
+                  {r.photos.slice(0, 3).map((p) => <img key={`thumb-${p}`} src={p} alt="" className="w-16 h-16 object-cover rounded-md border" />)}
                   {r.photos.length > 3 && <div className="w-16 h-16 bg-[#F4F4F5] rounded-md flex items-center justify-center text-sm">+{r.photos.length - 3}</div>}
                 </div>
               )}
@@ -142,7 +142,7 @@ export default function DamageReports() {
             <div><Label>Závažnost *</Label><Select value={formData.severity} onValueChange={(v) => setFormData({ ...formData, severity: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="nízká">Nízká</SelectItem><SelectItem value="střední">Střední</SelectItem><SelectItem value="vysoká">Vysoká</SelectItem></SelectContent></Select></div>
             <div><Label>Umístění *</Label><Input value={formData.location_on_vehicle} onChange={(e) => setFormData({ ...formData, location_on_vehicle: e.target.value })} required /></div>
             <div><Label>Fotografie</Label><Input type="file" accept="image/*" multiple onChange={handlePhotoUpload} />
-              {formData.photos.length > 0 && <div className="flex gap-2 mt-2 flex-wrap">{formData.photos.map((p, i) => <div key={i} className="relative"><img src={p} alt="" className="w-16 h-16 object-cover rounded-md border" /><button type="button" onClick={() => setFormData({ ...formData, photos: formData.photos.filter((_, idx) => idx !== i) })} className="absolute -top-2 -right-2 w-5 h-5 bg-[#FF2400] text-white rounded-full flex items-center justify-center text-xs"><X size={12} /></button></div>)}</div>}
+              {formData.photos.length > 0 && <div className="flex gap-2 mt-2 flex-wrap">{formData.photos.map((p) => <div key={`form-${p}`} className="relative"><img src={p} alt="" className="w-16 h-16 object-cover rounded-md border" /><button type="button" onClick={() => setFormData({ ...formData, photos: formData.photos.filter((x) => x !== p) })} className="absolute -top-2 -right-2 w-5 h-5 bg-[#FF2400] text-white rounded-full flex items-center justify-center text-xs"><X size={12} /></button></div>)}</div>}
             </div>
             <div><Label>Nahlásil</Label><Input value={formData.reported_by} onChange={(e) => setFormData({ ...formData, reported_by: e.target.value })} /></div>
             <DialogFooter><Button type="button" variant="outline" onClick={() => setShowModal(false)}>Zrušit</Button><Button type="submit" className="bg-[#002FA7] hover:bg-[#002480]" disabled={!formData.vehicle_id || !formData.description}>Nahlásit</Button></DialogFooter>
@@ -162,7 +162,7 @@ export default function DamageReports() {
                 <div><p className="text-[#52525B]">Nahlášeno</p><p className="font-medium">{new Date(selectedReport.created_at).toLocaleString("cs-CZ")}</p></div>
                 {selectedReport.reported_by && <div><p className="text-[#52525B]">Nahlásil</p><p className="font-medium">{selectedReport.reported_by}</p></div>}
               </div>
-              {selectedReport.photos?.length > 0 && <div><p className="text-sm text-[#52525B] mb-2">Fotografie</p><div className="grid grid-cols-2 gap-2">{selectedReport.photos.map((p, i) => <img key={i} src={p} alt="" className="w-full h-40 object-cover rounded-md border" />)}</div></div>}
+              {selectedReport.photos?.length > 0 && <div><p className="text-sm text-[#52525B] mb-2">Fotografie</p><div className="grid grid-cols-2 gap-2">{selectedReport.photos.map((p) => <img key={`view-${p}`} src={p} alt="" className="w-full h-40 object-cover rounded-md border" />)}</div></div>}
             </div>
           )}
         </DialogContent>

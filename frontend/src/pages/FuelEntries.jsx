@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { GasPump, Plus, Download } from "@phosphor-icons/react";
@@ -20,9 +20,7 @@ export default function FuelEntries() {
     vehicle_id: "", date: format(new Date(), "yyyy-MM-dd"), odometer: 0, liters: 0, price_per_liter: 38.90, total_price: 0, fuel_station: "", notes: ""
   });
 
-  useEffect(() => { fetchData(); }, [filters]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (filters.vehicle_id) params.append("vehicle_id", filters.vehicle_id);
@@ -36,7 +34,9 @@ export default function FuelEntries() {
       setVehicles(vehiclesRes.data);
     } catch (error) { toast.error("Nepodařilo se načíst záznamy"); } 
     finally { setLoading(false); }
-  };
+  }, [filters]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

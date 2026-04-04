@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
 import base64
-import random
+import secrets
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1074,27 +1074,27 @@ async def import_mock_gps_data(vehicle_id: str, user: User = Depends(get_current
     
     for day_offset in range(7):
         # 1-3 trips per day
-        num_trips = random.randint(1, 3)
+        num_trips = secrets.randbelow(3) + 1
         for trip_num in range(num_trips):
             trip_date = now - timedelta(days=day_offset)
             start_hour = 8 + trip_num * 3
             
-            start_time = trip_date.replace(hour=start_hour, minute=random.randint(0, 30))
-            duration_minutes = random.randint(30, 90)
+            start_time = trip_date.replace(hour=start_hour, minute=secrets.randbelow(31))
+            duration_minutes = secrets.randbelow(61) + 30
             end_time = start_time + timedelta(minutes=duration_minutes)
             
-            start_loc = random.choice(locations)
-            end_loc = random.choice([l for l in locations if l != start_loc])
+            start_loc = secrets.choice(locations)
+            end_loc = secrets.choice([l for l in locations if l != start_loc])
             
-            distance = random.randint(5000, 25000)  # 5-25 km in meters
+            distance = secrets.randbelow(20001) + 5000  # 5-25 km in meters
             
             # Generate route points
-            num_points = random.randint(10, 30)
+            num_points = secrets.randbelow(21) + 10
             route_points = []
             for i in range(num_points):
                 progress = i / num_points
-                lat = start_loc["lat"] + (end_loc["lat"] - start_loc["lat"]) * progress + random.uniform(-0.005, 0.005)
-                lng = start_loc["lng"] + (end_loc["lng"] - start_loc["lng"]) * progress + random.uniform(-0.005, 0.005)
+                lat = start_loc["lat"] + (end_loc["lat"] - start_loc["lat"]) * progress + (secrets.randbelow(1001) - 500) / 100000
+                lng = start_loc["lng"] + (end_loc["lng"] - start_loc["lng"]) * progress + (secrets.randbelow(1001) - 500) / 100000
                 point_time = start_time + timedelta(minutes=int(duration_minutes * progress))
                 route_points.append({
                     "lat": lat,
@@ -1112,8 +1112,8 @@ async def import_mock_gps_data(vehicle_id: str, user: User = Depends(get_current
                 "end_location": end_loc,
                 "route_points": route_points,
                 "distance": distance,
-                "max_speed": random.randint(50, 80),
-                "avg_speed": random.randint(25, 45),
+                "max_speed": secrets.randbelow(31) + 50,
+                "avg_speed": secrets.randbelow(21) + 25,
                 "synced_to_logbook": False,
                 "created_at": now.isoformat()
             }

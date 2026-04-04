@@ -1,20 +1,32 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { Car, Users, RoadHorizon, GasPump, Warning, TrendUp } from "@phosphor-icons/react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { toast } from "sonner";
 
+// Memoized chart styles
+const axisTick = { fill: '#52525B', fontSize: 12 };
+const tooltipStyle = {
+  background: '#FFFFFF',
+  border: '1px solid #E4E4E7',
+  borderRadius: '6px',
+  fontSize: '14px'
+};
+
+// Helper function for purpose badge
+const getPurposeBadgeClass = (purpose) => {
+  if (purpose === "výcvik") return "badge-info";
+  if (purpose === "služební") return "badge-warning";
+  return "badge-success";
+};
+
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [recentTrips, setRecentTrips] = useState([]);
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, []);
-
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = useCallback(async () => {
     try {
       const [statsRes, tripsRes] = await Promise.all([
         axios.get(`${API}/reports/dashboard`, { withCredentials: true }),
@@ -22,22 +34,18 @@ export default function Dashboard() {
       ]);
       setStats(statsRes.data);
       setRecentTrips(tripsRes.data.slice(0, 5));
-    } catch (error) {
+    } catch {
       toast.error("Nepodařilo se načíst data");
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="loading-spinner"></div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
 
-  const kpiCards = [
+  const kpiCards = useMemo(() => [
     {
       label: "Vozidla",
       value: stats?.total_vehicles || 0,
@@ -74,7 +82,7 @@ export default function Dashboard() {
       icon: TrendUp,
       color: "#002FA7"
     }
-  ];
+  ], [stats]);
 
   // Mock chart data for km trends
   const chartData = [
@@ -86,6 +94,14 @@ export default function Dashboard() {
     { date: "So", km: 28 },
     { date: "Ne", km: 15 }
   ];
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="loading-spinner"></div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6" data-testid="dashboard">
@@ -101,9 +117,9 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-        {kpiCards.map((kpi, index) => (
+        {kpiCards.map((kpi) => (
           <div
-            key={index}
+            key={kpi.label}
             className="kpi-card card-hover rounded-md"
             data-testid={`kpi-${kpi.label.toLowerCase().replace(/\s/g, '-')}`}
           >
@@ -138,20 +154,15 @@ export default function Dashboard() {
                   dataKey="date" 
                   axisLine={false}
                   tickLine={false}
-                  tick={{ fill: '#52525B', fontSize: 12 }}
+                  tick={axisTick}
                 />
                 <YAxis 
                   axisLine={false}
                   tickLine={false}
-                  tick={{ fill: '#52525B', fontSize: 12 }}
+                  tick={axisTick}
                 />
                 <Tooltip
-                  contentStyle={{
-                    background: '#FFFFFF',
-                    border: '1px solid #E4E4E7',
-                    borderRadius: '6px',
-                    fontSize: '14px'
-                  }}
+                  contentStyle={tooltipStyle}
                   formatter={(value) => [`${value} km`, 'Kilometry']}
                 />
                 <Area
@@ -233,11 +244,7 @@ export default function Dashboard() {
                     </td>
                     <td>{trip.distance} km</td>
                     <td>
-                      <span className={`badge ${
-                        trip.purpose === "výcvik" ? "badge-info" :
-                        trip.purpose === "služební" ? "badge-warning" :
-                        "badge-success"
-                      }`}>
+                      <span className={`badge ${getPurposeBadgeClass(trip.purpose)}`}>
                         {trip.purpose}
                       </span>
                     </td>
