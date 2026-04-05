@@ -1,0 +1,151 @@
+<analysis>**original_problem_statement**: Create a full-stack fleet management app for a driving school. Features include managing vehicles and instructors, generating a legally compliant driving logbook (Kniha jízd), tracking average kilometers, and managing fuel entries, damage reports, and vehicle handover protocols via dedicated QR codes and mobile-friendly forms. Include a mocked GPS data import system, an admin dashboard with analytics, OpenStreetMap integration, and Emergent-managed Google social login.
+
+**User's preferred language**: Czech (INSTRUCT next agent to respond in Czech only).
+
+**what currently exists?**: A fully functional React frontend and FastAPI backend using MongoDB. The app includes Google OAuth via Emergent Auth, a dashboard with charts, CRUD for vehicles and instructors, auto-generated logbooks, and mobile-friendly public forms accessed via QR codes. In the last session, the agent completed a major sweep of code quality improvements for the frontend (fixing / dependencies, removing array indices as React keys, and extracting inline objects).
+
+**Last working item**:
+- Last item agent was working: Applying code quality and linting fixes based on the user's previous code review. The agent successfully added missing / dependencies across 12 frontend files, fixed array indices used as keys, extracted inline chart data/constants to  or outside components, and resolved a hook conditional render issue in  and a syntax error in .
+- Status: USER VERIFICATION PENDING
+- Agent Testing Done: Y
+- Which testing method agent to use? testing_agent_v3_fork
+- User Testing Done: N
+
+**All Pending/In progress Issue list**:
+  Issue 1: Oversized and High Complexity Components (Frontend) (P1)
+     - Attempted fixes: Not started.
+     - Next debug checklist: Split  and  into smaller, manageable components. Simplify logic and extract helpers in , , , , , , , and . Fix any nested ternaries in  and .
+     - Why fix this issue and what will be achieved with the fix? Improves code maintainability, readability, and testability as requested in the user's code review.
+     - Status: NOT STARTED
+     - Is recurring issue? N
+     - Should Test frontend/backend/both after fix? frontend
+     - Blocked on other issue: None
+
+  Issue 2: Backend High Complexity Functions (P2)
+     - Attempted fixes: Evaluated  and  findings, replaced  with  (done in a previous session).
+     - Next debug checklist: Break down , , , , , and  in  into smaller helper functions.
+     - Why fix this issue and what will be achieved with the fix? Decreases cyclomatic complexity for better maintainability.
+     - Status: NOT STARTED
+     - Is recurring issue? N
+     - Should Test frontend/backend/both after fix? backend
+     - Blocked on other issue: None
+
+**In progress Task List**: None
+
+**Upcoming and Future Tasks**:
+  Upcoming Tasks:
+  - Complete the frontend code splitting and component refactoring (Issue 1) (P1).
+  - Complete backend function decomposition for complex endpoints (Issue 2) (P2).
+  
+  Future Tasks:
+  - Test full user flow with real Google OAuth (P2)
+  - Add sample data for demo (P2)
+  - Add PDF export for official logbook format (Kniha jízd) (P2)
+  - Add fuel consumption calculation per vehicle (P3)
+  - Advanced cost analytics (P3)
+  - Email notifications for damage (P3)
+  - Instructor login (separated from admin) (P3)
+  - Vehicle maintenance scheduling (P3)
+
+**Completed work in this session**:
+- Added missing React Hook dependencies (/) across 12 files: Reports, PublicHandoverForm, PublicFuelForm, PublicDamageForm, Logbook, Instructors, Handovers, GPSTracking, FuelEntries, DamageReports, Dashboard, Vehicles (DONE).
+- Replaced array indices with unique IDs for React keys in lists (DONE).
+- Extracted inline objects/constants out of render functions (DONE).
+- Fixed a syntax error in  from a previous session (DONE).
+- Fixed a React Hook rule violation in  (conditional ) (DONE).
+
+**Earlier issues found/mentioned but not fixed**: None explicitly apart from the oversized components.
+
+**Known issue recurrence from previous fork**:
+  - Issue recurrence in previous fork: None
+  - Recurrence count: 0
+  - Status: NOT STARTED
+
+**Code Architecture**:
+
+
+**Key Technical Concepts**:
+React, Tailwind CSS, Shadcn UI, Phosphor Icons, OpenStreetMap (Leaflet), FastAPI, MongoDB (Motor Async), Emergent Google Auth.
+
+**key DB schema**:
+  - : {id, registration_plate, brand, model, qr_code_fuel, qr_code_damage, qr_code_handover, instructor_id}
+  - : {id, name, email, phone}
+  - : {id, vehicle_id, date, driver_name, route, distance, purpose}
+  - : {id, vehicle_id, date, amount, price, odometer}
+  - : {id, vehicle_id, date, description, photos, status}
+  - : {id, vehicle_id, date, instructor_id, fluid_checks, photos}
+
+**changes in tech stack**:
+  - None
+
+**All files of reference**:
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+
+**Areas that need refactoring**:
+  -  (557 lines) - needs to be split into sub-components.
+  -  (489 lines) - needs to be split.
+  - Backend endpoints in  with cyclomatic complexity > 10.
+
+**key api endpoints**:
+  - , 
+  - , 
+  - 
+  - 
+  - 
+
+**Critical Info for New Agent**:
+  - **Always respond and format UI text in Czech**, as strictly requested by the user.
+  - The previous agent successfully completed the hook dependency/linting fixes from the user's code review. Wait for the user to confirm or prompt them about the next step: breaking down the oversized frontend components (, ) and complex backend functions in .
+  - When refactoring components, ensure you maintain the  wraps on fetch functions that were just implemented to prevent infinite re-renders.
+
+**documents and test reports created in this job**:
+  -  (Updated)
+  -  (Updated)
+  - 
+
+**Last 10 User Messages and any pending HUMAN messages**:
+- User asked agent to confirm plan -> Agent asked for confirmation via .
+- User responded Ano (Yes) -> Agent applied fixes across all frontend files.
+- Agent encountered hook condition violation in Dashboard and syntax error in Vehicles -> Agent fixed both issues.
+- Agent successfully compiled frontend and ran testing agent -> Agent updated PRD and finished.
+
+**Project Health Check:**
+  - Broken: None
+  - Mocked: GPS tracking data import.
+
+**3rd Party Integrations**:
+  - Emergent Google Auth — requires Emergent Auth integration logic.
+  - OpenStreetMap (Leaflet) — no key required.
+
+**Testing status**:
+  - Testing agent used after significant changes: YES (Iteration 4 passed with 92% backend coverage and clean frontend compile)
+  - Troubleshoot agent used after agent stuck in loop: NO
+  - Test files created: 
+  - Known regressions: None.
+
+**Credentials to test flow:**
+  - Check  for any required mock auth details.
+
+**What agent forgot to execute**:
+  - Nothing was missed regarding the hook dependencies and React keys task.
+
+**Debugging checklist for current issue**:
+    Issue: Oversized Components Refactoring
+    Frontend files to check: 
+      -  (Split into Step components: Info, Fluid Checks, Photos, Signature)
+      -  (Extract table row logic, modal forms)
+    Backend files to check:
+      -  (Decompose , , )</analysis>
