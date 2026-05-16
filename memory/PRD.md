@@ -55,6 +55,11 @@ Create a fleet management app for a small driving school with vehicle management
 - [x] Vehicles.jsx useCallback syntax fixed
 - [x] Backend random module replaced with secrets
 
+## Component Refactoring (2026-05-16)
+- [x] PublicHandoverForm.jsx split: 557 → ~170 lines + 4 sub-components (HandoverInfoStep, HandoverFluidStep, HandoverPhotoStep, HandoverReviewStep)
+- [x] Vehicles.jsx split: 492 → ~140 lines + 3 sub-components (VehicleCard, VehicleFormModal, VehicleQRModal)
+- [x] Backend server.py: 13 helper functions extracted (parse_datetime_field, enrich_vehicle_info, enrich_instructor_name, extract_session_token, validate_session, _fetch_emergent_session, _upsert_user, _create_user_session, _validate_handover_photos, _validate_fluid_checks, _generate_route_points, _generate_mock_trip, _parse_trip_times)
+
 ## P0 Features (Critical - Done)
 - [x] Authentication
 - [x] Vehicle/Instructor CRUD
@@ -67,16 +72,12 @@ Create a fleet management app for a small driving school with vehicle management
 - [x] Map visualization
 - [x] Reports with date ranges
 
-## Remaining Code Quality Tasks
-- [ ] Split PublicHandoverForm.jsx (557 lines) into smaller components
-- [ ] Split Vehicles.jsx (491 lines) into smaller components
-- [ ] Backend function decomposition (server.py complex functions)
-
 ## P2 Features (Nice to have - Backlog)
+- [ ] PDF export for logbook (Kniha jízd)
 - [ ] Real Teltonika FMB003 integration
-- [ ] PDF export for logbook
 - [ ] Email notifications for damage reports
 - [ ] Multi-language support
 - [ ] Instructor login (separate from admin)
 - [ ] Fuel consumption analytics
 - [ ] Vehicle maintenance scheduling
+- [ ] Sample data for demo
