@@ -272,103 +272,124 @@ class QRHandover(BaseModel):
     notes: Optional[str] = None
     created_at: datetime
 
+# ======================== HELPERS ========================
+
+def parse_datetime_field(doc: dict, field: str):
+    """Convert an ISO string field to datetime in-place if needed."""
+    val = doc.get(field)
+    if isinstance(val, str):
+        doc[field] = datetime.fromisoformat(val)
+
+
+def parse_expires_at(value) -> datetime:
+    """Parse expiry value into a timezone-aware datetime."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+async def enrich_vehicle_info(doc: dict):
+    """Add vehicle_info string to a document that has vehicle_id."""
+    vehicle = await db.vehicles.find_one({"vehicle_id": doc["vehicle_id"]}, {"_id": 0})
+    if vehicle:
+        doc["vehicle_info"] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+
+
+async def enrich_instructor_name(doc: dict):
+    """Add instructor_name to a document that has instructor_id."""
+    if doc.get("instructor_id"):
+        instructor = await db.instructors.find_one({"instructor_id": doc["instructor_id"]}, {"_id": 0})
+        if instructor:
+            doc["instructor_name"] = instructor["name"]
+
+
+def extract_session_token(request: Request) -> str:
+    """Extract session token from cookie or Authorization header."""
+    token = request.cookies.get("session_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+    return token
+
+
+async def validate_session(session_token: str) -> dict:
+    """Validate session token and return session doc. Raises HTTPException on failure."""
+    session_doc = await db.user_sessions.find_one(
+        {"session_token": session_token}, {"_id": 0}
+    )
+    if not session_doc:
+        raise HTTPException(status_code=401, detail="Neplatná relace")
+
+    expires_at = parse_expires_at(session_doc["expires_at"])
+    if expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Relace vypršela")
+
+    return session_doc
+
+
 # ======================== AUTH HELPERS ========================
 
 async def get_current_user(request: Request) -> User:
     """Get current user from session token - REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS"""
-    session_token = request.cookies.get("session_token")
-    if not session_token:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            session_token = auth_header.split(" ")[1]
-    
+    session_token = extract_session_token(request)
     if not session_token:
         raise HTTPException(status_code=401, detail="Nepřihlášen")
-    
-    session_doc = await db.user_sessions.find_one(
-        {"session_token": session_token},
-        {"_id": 0}
-    )
-    
-    if not session_doc:
-        raise HTTPException(status_code=401, detail="Neplatná relace")
-    
-    expires_at = session_doc["expires_at"]
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="Relace vypršela")
-    
+
+    session_doc = await validate_session(session_token)
+
     user_doc = await db.users.find_one(
-        {"user_id": session_doc["user_id"]},
-        {"_id": 0}
+        {"user_id": session_doc["user_id"]}, {"_id": 0}
     )
-    
     if not user_doc:
         raise HTTPException(status_code=401, detail="Uživatel nenalezen")
-    
-    if isinstance(user_doc.get('created_at'), str):
-        user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
-    
+
+    parse_datetime_field(user_doc, "created_at")
     return User(**user_doc)
 
 # ======================== AUTH ROUTES ========================
 
-@api_router.post("/auth/session")
-async def process_session(request: Request, response: Response):
-    """Process session_id from Emergent Auth and establish session"""
-    data = await request.json()
-    session_id = data.get("session_id")
-    
-    if not session_id:
-        raise HTTPException(status_code=400, detail="Chybí session_id")
-    
-    # Call Emergent Auth to get session data
-    async with httpx.AsyncClient() as client:
-        auth_response = await client.get(
+async def _fetch_emergent_session(session_id: str) -> dict:
+    """Call Emergent Auth to validate session_id and return session data."""
+    async with httpx.AsyncClient() as http_client:
+        auth_response = await http_client.get(
             "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
             headers={"X-Session-ID": session_id}
         )
-        
         if auth_response.status_code != 200:
             raise HTTPException(status_code=401, detail="Neplatný session_id")
-        
-        session_data = auth_response.json()
-    
-    user_id = f"user_{uuid.uuid4().hex[:12]}"
+        return auth_response.json()
+
+
+async def _upsert_user(session_data: dict) -> str:
+    """Find or create user from Emergent session data. Returns user_id."""
     email = session_data["email"]
-    
-    # Check if user exists
     existing_user = await db.users.find_one({"email": email}, {"_id": 0})
-    
+
     if existing_user:
         user_id = existing_user["user_id"]
-        # Update user data
         await db.users.update_one(
             {"user_id": user_id},
-            {"$set": {
-                "name": session_data["name"],
-                "picture": session_data.get("picture"),
-            }}
+            {"$set": {"name": session_data["name"], "picture": session_data.get("picture")}}
         )
     else:
-        # Create new user
-        new_user = {
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        await db.users.insert_one({
             "user_id": user_id,
             "email": email,
             "name": session_data["name"],
             "picture": session_data.get("picture"),
             "role": "admin",
             "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        await db.users.insert_one(new_user)
-    
-    # Create session
-    session_token = session_data["session_token"]
+        })
+    return user_id
+
+
+async def _create_user_session(user_id: str, session_token: str) -> datetime:
+    """Replace existing sessions and create a new one. Returns expiry datetime."""
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-    
     await db.user_sessions.delete_many({"user_id": user_id})
     await db.user_sessions.insert_one({
         "user_id": user_id,
@@ -376,18 +397,31 @@ async def process_session(request: Request, response: Response):
         "expires_at": expires_at.isoformat(),
         "created_at": datetime.now(timezone.utc).isoformat()
     })
-    
-    # Set cookie
+    return expires_at
+
+
+@api_router.post("/auth/session")
+async def process_session(request: Request, response: Response):
+    """Process session_id from Emergent Auth and establish session"""
+    data = await request.json()
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Chybí session_id")
+
+    session_data = await _fetch_emergent_session(session_id)
+    user_id = await _upsert_user(session_data)
+    await _create_user_session(user_id, session_data["session_token"])
+
     response.set_cookie(
         key="session_token",
-        value=session_token,
+        value=session_data["session_token"],
         httponly=True,
         secure=True,
         samesite="none",
         max_age=7*24*60*60,
         path="/"
     )
-    
+
     user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     return UserResponse(**user_doc)
 
@@ -413,11 +447,8 @@ async def get_vehicles(user: User = Depends(get_current_user)):
     """Get all vehicles"""
     vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(1000)
     for v in vehicles:
-        if isinstance(v.get('created_at'), str):
-            v['created_at'] = datetime.fromisoformat(v['created_at'])
-        if isinstance(v.get('updated_at'), str):
-            v['updated_at'] = datetime.fromisoformat(v['updated_at'])
-        # Add qr_code_handover if missing (for existing vehicles)
+        parse_datetime_field(v, "created_at")
+        parse_datetime_field(v, "updated_at")
         if not v.get('qr_code_handover'):
             v['qr_code_handover'] = f"handover_{v['vehicle_id']}"
     return vehicles
@@ -428,11 +459,8 @@ async def get_vehicle(vehicle_id: str, user: User = Depends(get_current_user)):
     vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
-    if isinstance(vehicle.get('created_at'), str):
-        vehicle['created_at'] = datetime.fromisoformat(vehicle['created_at'])
-    if isinstance(vehicle.get('updated_at'), str):
-        vehicle['updated_at'] = datetime.fromisoformat(vehicle['updated_at'])
-    # Add qr_code_handover if missing
+    parse_datetime_field(vehicle, "created_at")
+    parse_datetime_field(vehicle, "updated_at")
     if not vehicle.get('qr_code_handover'):
         vehicle['qr_code_handover'] = f"handover_{vehicle['vehicle_id']}"
     return Vehicle(**vehicle)
@@ -477,8 +505,7 @@ async def update_vehicle(vehicle_id: str, data: VehicleCreate, user: User = Depe
     )
     
     updated = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
-    if isinstance(updated.get('created_at'), str):
-        updated['created_at'] = datetime.fromisoformat(updated['created_at'])
+    parse_datetime_field(updated, "created_at")
     updated['updated_at'] = now
     return Vehicle(**updated)
 
@@ -528,10 +555,8 @@ async def get_instructors(user: User = Depends(get_current_user)):
     """Get all instructors"""
     instructors = await db.instructors.find({}, {"_id": 0}).to_list(1000)
     for i in instructors:
-        if isinstance(i.get('created_at'), str):
-            i['created_at'] = datetime.fromisoformat(i['created_at'])
-        if isinstance(i.get('updated_at'), str):
-            i['updated_at'] = datetime.fromisoformat(i['updated_at'])
+        parse_datetime_field(i, "created_at")
+        parse_datetime_field(i, "updated_at")
     return instructors
 
 @api_router.get("/instructors/{instructor_id}", response_model=Instructor)
@@ -540,10 +565,8 @@ async def get_instructor(instructor_id: str, user: User = Depends(get_current_us
     instructor = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
     if not instructor:
         raise HTTPException(status_code=404, detail="Instruktor nenalezen")
-    if isinstance(instructor.get('created_at'), str):
-        instructor['created_at'] = datetime.fromisoformat(instructor['created_at'])
-    if isinstance(instructor.get('updated_at'), str):
-        instructor['updated_at'] = datetime.fromisoformat(instructor['updated_at'])
+    parse_datetime_field(instructor, "created_at")
+    parse_datetime_field(instructor, "updated_at")
     return Instructor(**instructor)
 
 @api_router.post("/instructors", response_model=Instructor)
@@ -583,8 +606,7 @@ async def update_instructor(instructor_id: str, data: InstructorCreate, user: Us
     )
     
     updated = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
-    if isinstance(updated.get('created_at'), str):
-        updated['created_at'] = datetime.fromisoformat(updated['created_at'])
+    parse_datetime_field(updated, "created_at")
     updated['updated_at'] = now
     return Instructor(**updated)
 
@@ -621,19 +643,10 @@ async def get_logbook_entries(
     
     entries = await db.logbook.find(query, {"_id": 0}).sort("date", -1).to_list(1000)
     
-    # Enrich with vehicle and instructor info
     for entry in entries:
-        if isinstance(entry.get('created_at'), str):
-            entry['created_at'] = datetime.fromisoformat(entry['created_at'])
-        
-        vehicle = await db.vehicles.find_one({"vehicle_id": entry["vehicle_id"]}, {"_id": 0})
-        if vehicle:
-            entry['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
-        
-        if entry.get('instructor_id'):
-            instructor = await db.instructors.find_one({"instructor_id": entry["instructor_id"]}, {"_id": 0})
-            if instructor:
-                entry['instructor_name'] = instructor['name']
+        parse_datetime_field(entry, "created_at")
+        await enrich_vehicle_info(entry)
+        await enrich_instructor_name(entry)
     
     return entries
 
@@ -663,15 +676,8 @@ async def create_logbook_entry(data: LogbookEntryCreate, user: User = Depends(ge
     
     entry['created_at'] = now
     
-    # Enrich response
-    vehicle = await db.vehicles.find_one({"vehicle_id": data.vehicle_id}, {"_id": 0})
-    if vehicle:
-        entry['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
-    
-    if data.instructor_id:
-        instructor = await db.instructors.find_one({"instructor_id": data.instructor_id}, {"_id": 0})
-        if instructor:
-            entry['instructor_name'] = instructor['name']
+    await enrich_vehicle_info(entry)
+    await enrich_instructor_name(entry)
     
     return LogbookEntry(**entry)
 
@@ -706,12 +712,8 @@ async def get_fuel_entries(
     entries = await db.fuel_entries.find(query, {"_id": 0}).sort("date", -1).to_list(1000)
     
     for entry in entries:
-        if isinstance(entry.get('created_at'), str):
-            entry['created_at'] = datetime.fromisoformat(entry['created_at'])
-        
-        vehicle = await db.vehicles.find_one({"vehicle_id": entry["vehicle_id"]}, {"_id": 0})
-        if vehicle:
-            entry['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+        parse_datetime_field(entry, "created_at")
+        await enrich_vehicle_info(entry)
     
     return entries
 
@@ -737,9 +739,7 @@ async def create_fuel_entry(data: FuelEntryCreate, user: User = Depends(get_curr
     
     entry['created_at'] = now
     
-    vehicle = await db.vehicles.find_one({"vehicle_id": data.vehicle_id}, {"_id": 0})
-    if vehicle:
-        entry['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+    await enrich_vehicle_info(entry)
     
     return FuelEntry(**entry)
 
@@ -787,14 +787,9 @@ async def get_damage_reports(
     reports = await db.damage_reports.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     
     for report in reports:
-        if isinstance(report.get('created_at'), str):
-            report['created_at'] = datetime.fromisoformat(report['created_at'])
-        if isinstance(report.get('resolved_at'), str):
-            report['resolved_at'] = datetime.fromisoformat(report['resolved_at'])
-        
-        vehicle = await db.vehicles.find_one({"vehicle_id": report["vehicle_id"]}, {"_id": 0})
-        if vehicle:
-            report['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+        parse_datetime_field(report, "created_at")
+        parse_datetime_field(report, "resolved_at")
+        await enrich_vehicle_info(report)
     
     return reports
 
@@ -815,9 +810,7 @@ async def create_damage_report(data: DamageReportCreate, user: User = Depends(ge
     await db.damage_reports.insert_one(report)
     report['created_at'] = now
     
-    vehicle = await db.vehicles.find_one({"vehicle_id": data.vehicle_id}, {"_id": 0})
-    if vehicle:
-        report['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+    await enrich_vehicle_info(report)
     
     return DamageReport(**report)
 
@@ -880,16 +873,9 @@ async def get_handover_protocols(
     protocols = await db.handover_protocols.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     
     for protocol in protocols:
-        if isinstance(protocol.get('created_at'), str):
-            protocol['created_at'] = datetime.fromisoformat(protocol['created_at'])
-        
-        vehicle = await db.vehicles.find_one({"vehicle_id": protocol["vehicle_id"]}, {"_id": 0})
-        if vehicle:
-            protocol['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
-        
-        instructor = await db.instructors.find_one({"instructor_id": protocol["instructor_id"]}, {"_id": 0})
-        if instructor:
-            protocol['instructor_name'] = instructor['name']
+        parse_datetime_field(protocol, "created_at")
+        await enrich_vehicle_info(protocol)
+        await enrich_instructor_name(protocol)
     
     return protocols
 
@@ -915,13 +901,8 @@ async def create_handover_protocol(data: HandoverProtocolCreate, user: User = De
     
     protocol['created_at'] = now
     
-    vehicle = await db.vehicles.find_one({"vehicle_id": data.vehicle_id}, {"_id": 0})
-    if vehicle:
-        protocol['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
-    
-    instructor = await db.instructors.find_one({"instructor_id": data.instructor_id}, {"_id": 0})
-    if instructor:
-        protocol['instructor_name'] = instructor['name']
+    await enrich_vehicle_info(protocol)
+    await enrich_instructor_name(protocol)
     
     return HandoverProtocol(**protocol)
 
@@ -940,12 +921,8 @@ async def get_qr_handovers(
     handovers = await db.qr_handovers.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     
     for h in handovers:
-        if isinstance(h.get('created_at'), str):
-            h['created_at'] = datetime.fromisoformat(h['created_at'])
-        
-        vehicle = await db.vehicles.find_one({"vehicle_id": h["vehicle_id"]}, {"_id": 0})
-        if vehicle:
-            h['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+        parse_datetime_field(h, "created_at")
+        await enrich_vehicle_info(h)
     
     return handovers
 
@@ -956,44 +933,46 @@ async def get_qr_handover(qr_handover_id: str, user: User = Depends(get_current_
     if not handover:
         raise HTTPException(status_code=404, detail="Předávací protokol nenalezen")
     
-    if isinstance(handover.get('created_at'), str):
-        handover['created_at'] = datetime.fromisoformat(handover['created_at'])
-    
-    vehicle = await db.vehicles.find_one({"vehicle_id": handover["vehicle_id"]}, {"_id": 0})
-    if vehicle:
-        handover['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+    parse_datetime_field(handover, "created_at")
+    await enrich_vehicle_info(handover)
     
     return handover
 
 # Public endpoint for QR handover submission
+def _validate_handover_photos(photos: list):
+    """Validate all 6 required photo types are present."""
+    required = {"front", "rear", "left", "right", "interior", "dashboard"}
+    provided = {p.photo_type for p in photos}
+    missing = required - provided
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Chybí požadované fotografie: {', '.join(missing)}")
+
+
+def _validate_fluid_checks(fluid_checks: FluidChecks):
+    """Validate all fluid checks are confirmed."""
+    if not all([
+        fluid_checks.engine_oil,
+        fluid_checks.coolant,
+        fluid_checks.brake_fluid,
+        fluid_checks.windshield_washer,
+        fluid_checks.other_fluids
+    ]):
+        raise HTTPException(status_code=400, detail="Všechny provozní kapaliny musí být zkontrolovány")
+
+
 @api_router.post("/public/qr-handover")
 async def create_public_qr_handover(data: QRHandoverCreate):
     """Create QR handover protocol via QR code (public endpoint for mobile)"""
     vehicle = await db.vehicles.find_one({"vehicle_id": data.vehicle_id}, {"_id": 0})
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
-    
-    # Validate that all 6 required photos are provided
-    required_photo_types = {"front", "rear", "left", "right", "interior", "dashboard"}
-    provided_photo_types = {p.photo_type for p in data.photos}
-    
-    if provided_photo_types != required_photo_types:
-        missing = required_photo_types - provided_photo_types
-        raise HTTPException(status_code=400, detail=f"Chybí požadované fotografie: {', '.join(missing)}")
-    
-    # Validate fluid checks - all must be checked
-    if not all([
-        data.fluid_checks.engine_oil,
-        data.fluid_checks.coolant,
-        data.fluid_checks.brake_fluid,
-        data.fluid_checks.windshield_washer,
-        data.fluid_checks.other_fluids
-    ]):
-        raise HTTPException(status_code=400, detail="Všechny provozní kapaliny musí být zkontrolovány")
-    
+
+    _validate_handover_photos(data.photos)
+    _validate_fluid_checks(data.fluid_checks)
+
     qr_handover_id = f"qrh_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
-    
+
     handover = {
         "qr_handover_id": qr_handover_id,
         "vehicle_id": data.vehicle_id,
@@ -1006,15 +985,14 @@ async def create_public_qr_handover(data: QRHandoverCreate):
         "notes": data.notes,
         "created_at": now.isoformat()
     }
-    
+
     await db.qr_handovers.insert_one(handover)
-    
-    # Update vehicle odometer
+
     await db.vehicles.update_one(
         {"vehicle_id": data.vehicle_id},
         {"$set": {"odometer": data.odometer, "updated_at": now.isoformat()}}
     )
-    
+
     return {
         "message": "Předávací protokol úspěšně vytvořen",
         "qr_handover_id": qr_handover_id,
@@ -1038,18 +1016,63 @@ async def get_gps_trips(
     trips = await db.gps_trips.find(query, {"_id": 0}).sort("start_time", -1).to_list(1000)
     
     for trip in trips:
-        if isinstance(trip.get('start_time'), str):
-            trip['start_time'] = datetime.fromisoformat(trip['start_time'])
-        if isinstance(trip.get('end_time'), str):
-            trip['end_time'] = datetime.fromisoformat(trip['end_time'])
-        if isinstance(trip.get('created_at'), str):
-            trip['created_at'] = datetime.fromisoformat(trip['created_at'])
-        
-        vehicle = await db.vehicles.find_one({"vehicle_id": trip["vehicle_id"]}, {"_id": 0})
-        if vehicle:
-            trip['vehicle_info'] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+        parse_datetime_field(trip, "start_time")
+        parse_datetime_field(trip, "end_time")
+        parse_datetime_field(trip, "created_at")
+        await enrich_vehicle_info(trip)
     
     return trips
+
+# Sample Czech locations for driving school
+_MOCK_LOCATIONS = [
+    {"lat": 50.0755, "lng": 14.4378, "address": "Praha, Václavské náměstí"},
+    {"lat": 50.0880, "lng": 14.4208, "address": "Praha, Letná"},
+    {"lat": 50.0663, "lng": 14.3782, "address": "Praha, Smíchov"},
+    {"lat": 50.1010, "lng": 14.4000, "address": "Praha, Kobylisy"},
+    {"lat": 50.0500, "lng": 14.4600, "address": "Praha, Vršovice"},
+    {"lat": 50.0800, "lng": 14.5000, "address": "Praha, Žižkov"},
+]
+
+
+def _generate_route_points(start_loc: dict, end_loc: dict, start_time: datetime, duration_minutes: int) -> list:
+    """Generate interpolated route points between two locations."""
+    num_points = secrets.randbelow(21) + 10
+    points = []
+    for i in range(num_points):
+        progress = i / num_points
+        lat = start_loc["lat"] + (end_loc["lat"] - start_loc["lat"]) * progress + (secrets.randbelow(1001) - 500) / 100000
+        lng = start_loc["lng"] + (end_loc["lng"] - start_loc["lng"]) * progress + (secrets.randbelow(1001) - 500) / 100000
+        point_time = start_time + timedelta(minutes=int(duration_minutes * progress))
+        points.append({"lat": lat, "lng": lng, "timestamp": point_time.isoformat()})
+    return points
+
+
+def _generate_mock_trip(vehicle_id: str, trip_date: datetime, trip_num: int, now: datetime) -> dict:
+    """Generate a single mock GPS trip dict."""
+    start_hour = 8 + trip_num * 3
+    start_time = trip_date.replace(hour=start_hour, minute=secrets.randbelow(31))
+    duration_minutes = secrets.randbelow(61) + 30
+    end_time = start_time + timedelta(minutes=duration_minutes)
+
+    start_loc = secrets.choice(_MOCK_LOCATIONS)
+    end_loc = secrets.choice([loc for loc in _MOCK_LOCATIONS if loc != start_loc])
+    distance = secrets.randbelow(20001) + 5000
+
+    return {
+        "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
+        "vehicle_id": vehicle_id,
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+        "start_location": start_loc,
+        "end_location": end_loc,
+        "route_points": _generate_route_points(start_loc, end_loc, start_time, duration_minutes),
+        "distance": distance,
+        "max_speed": secrets.randbelow(31) + 50,
+        "avg_speed": secrets.randbelow(21) + 25,
+        "synced_to_logbook": False,
+        "created_at": now.isoformat()
+    }
+
 
 @api_router.post("/gps/import-mock")
 async def import_mock_gps_data(vehicle_id: str, user: User = Depends(get_current_user)):
@@ -1057,71 +1080,28 @@ async def import_mock_gps_data(vehicle_id: str, user: User = Depends(get_current
     vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
-    
-    # Generate mock trips for the last 7 days
-    trips_created = []
+
     now = datetime.now(timezone.utc)
-    
-    # Sample Czech locations for driving school
-    locations = [
-        {"lat": 50.0755, "lng": 14.4378, "address": "Praha, Václavské náměstí"},
-        {"lat": 50.0880, "lng": 14.4208, "address": "Praha, Letná"},
-        {"lat": 50.0663, "lng": 14.3782, "address": "Praha, Smíchov"},
-        {"lat": 50.1010, "lng": 14.4000, "address": "Praha, Kobylisy"},
-        {"lat": 50.0500, "lng": 14.4600, "address": "Praha, Vršovice"},
-        {"lat": 50.0800, "lng": 14.5000, "address": "Praha, Žižkov"},
-    ]
-    
+    trips_created = []
+
     for day_offset in range(7):
-        # 1-3 trips per day
         num_trips = secrets.randbelow(3) + 1
+        trip_date = now - timedelta(days=day_offset)
         for trip_num in range(num_trips):
-            trip_date = now - timedelta(days=day_offset)
-            start_hour = 8 + trip_num * 3
-            
-            start_time = trip_date.replace(hour=start_hour, minute=secrets.randbelow(31))
-            duration_minutes = secrets.randbelow(61) + 30
-            end_time = start_time + timedelta(minutes=duration_minutes)
-            
-            start_loc = secrets.choice(locations)
-            end_loc = secrets.choice([l for l in locations if l != start_loc])
-            
-            distance = secrets.randbelow(20001) + 5000  # 5-25 km in meters
-            
-            # Generate route points
-            num_points = secrets.randbelow(21) + 10
-            route_points = []
-            for i in range(num_points):
-                progress = i / num_points
-                lat = start_loc["lat"] + (end_loc["lat"] - start_loc["lat"]) * progress + (secrets.randbelow(1001) - 500) / 100000
-                lng = start_loc["lng"] + (end_loc["lng"] - start_loc["lng"]) * progress + (secrets.randbelow(1001) - 500) / 100000
-                point_time = start_time + timedelta(minutes=int(duration_minutes * progress))
-                route_points.append({
-                    "lat": lat,
-                    "lng": lng,
-                    "timestamp": point_time.isoformat()
-                })
-            
-            trip_id = f"gps_{uuid.uuid4().hex[:12]}"
-            trip = {
-                "trip_id": trip_id,
-                "vehicle_id": vehicle_id,
-                "start_time": start_time.isoformat(),
-                "end_time": end_time.isoformat(),
-                "start_location": start_loc,
-                "end_location": end_loc,
-                "route_points": route_points,
-                "distance": distance,
-                "max_speed": secrets.randbelow(31) + 50,
-                "avg_speed": secrets.randbelow(21) + 25,
-                "synced_to_logbook": False,
-                "created_at": now.isoformat()
-            }
-            
+            trip = _generate_mock_trip(vehicle_id, trip_date, trip_num, now)
             await db.gps_trips.insert_one(trip)
-            trips_created.append(trip_id)
-    
+            trips_created.append(trip["trip_id"])
+
     return {"message": f"Importováno {len(trips_created)} GPS záznamů", "trip_ids": trips_created}
+
+def _parse_trip_times(trip: dict) -> tuple:
+    """Parse start_time and end_time from a GPS trip document."""
+    st = trip["start_time"]
+    et = trip["end_time"]
+    start_time = datetime.fromisoformat(st) if isinstance(st, str) else st
+    end_time = datetime.fromisoformat(et) if isinstance(et, str) else et
+    return start_time, end_time
+
 
 @api_router.post("/gps/trips/{trip_id}/sync-to-logbook")
 async def sync_trip_to_logbook(trip_id: str, user: User = Depends(get_current_user)):
@@ -1129,26 +1109,21 @@ async def sync_trip_to_logbook(trip_id: str, user: User = Depends(get_current_us
     trip = await db.gps_trips.find_one({"trip_id": trip_id}, {"_id": 0})
     if not trip:
         raise HTTPException(status_code=404, detail="GPS záznam nenalezen")
-    
     if trip.get("synced_to_logbook"):
         raise HTTPException(status_code=400, detail="Záznam již byl synchronizován")
-    
+
     vehicle = await db.vehicles.find_one({"vehicle_id": trip["vehicle_id"]}, {"_id": 0})
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
-    
-    start_time = datetime.fromisoformat(trip["start_time"]) if isinstance(trip["start_time"], str) else trip["start_time"]
-    end_time = datetime.fromisoformat(trip["end_time"]) if isinstance(trip["end_time"], str) else trip["end_time"]
-    
-    entry_id = f"log_{uuid.uuid4().hex[:12]}"
+
+    start_time, end_time = _parse_trip_times(trip)
     now = datetime.now(timezone.utc)
-    
     distance_km = trip["distance"] // 1000
     start_odometer = vehicle["odometer"]
     end_odometer = start_odometer + distance_km
-    
+
     logbook_entry = {
-        "entry_id": entry_id,
+        "entry_id": f"log_{uuid.uuid4().hex[:12]}",
         "vehicle_id": trip["vehicle_id"],
         "instructor_id": vehicle.get("assigned_instructor_id"),
         "date": start_time.strftime("%Y-%m-%d"),
@@ -1165,22 +1140,15 @@ async def sync_trip_to_logbook(trip_id: str, user: User = Depends(get_current_us
         "gps_source": True,
         "created_at": now.isoformat()
     }
-    
+
     await db.logbook.insert_one(logbook_entry)
-    
-    # Update trip as synced
-    await db.gps_trips.update_one(
-        {"trip_id": trip_id},
-        {"$set": {"synced_to_logbook": True}}
-    )
-    
-    # Update vehicle odometer
+    await db.gps_trips.update_one({"trip_id": trip_id}, {"$set": {"synced_to_logbook": True}})
     await db.vehicles.update_one(
         {"vehicle_id": trip["vehicle_id"]},
         {"$set": {"odometer": end_odometer, "updated_at": now.isoformat()}}
     )
-    
-    return {"message": "Záznam synchronizován do knihy jízd", "entry_id": entry_id}
+
+    return {"message": "Záznam synchronizován do knihy jízd", "entry_id": logbook_entry["entry_id"]}
 
 # ======================== REPORTS & ANALYTICS ========================
 
