@@ -1,10 +1,11 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import io
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -13,6 +14,13 @@ from datetime import datetime, timezone, timedelta
 import httpx
 import base64
 import secrets
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1245,6 +1253,215 @@ async def get_km_statistics(
         "daily_stats": [{"date": k, "km": v} for k, v in sorted(daily_stats.items())],
         "vehicle_stats": vehicle_stats
     }
+
+# ======================== PDF EXPORT ========================
+
+def _build_logbook_pdf(entries: list, date_from: str, date_to: str) -> io.BytesIO:
+    """Generate a Czech-format logbook PDF from entries."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleCZ", parent=styles["Title"], fontSize=16, spaceAfter=6)
+    subtitle_style = ParagraphStyle("SubCZ", parent=styles["Normal"], fontSize=10, textColor=colors.grey, spaceAfter=12)
+    cell_style = ParagraphStyle("CellCZ", parent=styles["Normal"], fontSize=7, leading=9)
+    header_style = ParagraphStyle("HeaderCZ", parent=styles["Normal"], fontSize=7, leading=9, textColor=colors.white)
+
+    elements = []
+    elements.append(Paragraph("Kniha jizd - Autoskola", title_style))
+    period = f"Obdobi: {date_from or 'neuvedeno'} az {date_to or 'neuvedeno'}"
+    elements.append(Paragraph(period, subtitle_style))
+    elements.append(Spacer(1, 4*mm))
+
+    headers = ["Datum", "Cas", "Vozidlo", "Ridic", "Odkud", "Kam", "Zac. km", "Kon. km", "Vzd.", "Ucel", "Zdroj"]
+    header_row = [Paragraph(h, header_style) for h in headers]
+
+    data = [header_row]
+    total_km = 0
+    for e in entries:
+        distance = e.get("distance", 0)
+        total_km += distance
+        source = "GPS" if e.get("gps_source") else "Man."
+        row = [
+            Paragraph(e.get("date", ""), cell_style),
+            Paragraph(f"{e.get('start_time', '')}-{e.get('end_time', '')}", cell_style),
+            Paragraph(e.get("vehicle_info", ""), cell_style),
+            Paragraph(e.get("instructor_name", "-"), cell_style),
+            Paragraph(e.get("start_location", ""), cell_style),
+            Paragraph(e.get("end_location", ""), cell_style),
+            Paragraph(str(e.get("start_odometer", "")), cell_style),
+            Paragraph(str(e.get("end_odometer", "")), cell_style),
+            Paragraph(f"{distance} km", cell_style),
+            Paragraph(e.get("purpose", ""), cell_style),
+            Paragraph(source, cell_style),
+        ]
+        data.append(row)
+
+    # Summary row
+    summary_row = [Paragraph("", cell_style)] * 8 + [
+        Paragraph(f"{total_km} km", ParagraphStyle("BoldCell", parent=cell_style, fontName="Helvetica-Bold")),
+        Paragraph("Celkem", cell_style),
+        Paragraph("", cell_style),
+    ]
+    data.append(summary_row)
+
+    col_widths = [22*mm, 22*mm, 40*mm, 28*mm, 35*mm, 35*mm, 18*mm, 18*mm, 18*mm, 20*mm, 14*mm]
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#002FA7")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("ALIGN", (6, 1), (8, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4E4E7")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F4F4F5")]),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F4F4F5")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(table)
+
+    elements.append(Spacer(1, 8*mm))
+    footer_text = f"Vygenerovano: {datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M')} UTC | Celkem zaznamu: {len(entries)} | Celkem km: {total_km}"
+    elements.append(Paragraph(footer_text, subtitle_style))
+
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+
+@api_router.get("/logbook/export-pdf")
+async def export_logbook_pdf(
+    vehicle_id: Optional[str] = None,
+    instructor_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    user: User = Depends(get_current_user)
+):
+    """Export logbook entries as a PDF file"""
+    query = {}
+    if vehicle_id:
+        query["vehicle_id"] = vehicle_id
+    if instructor_id:
+        query["instructor_id"] = instructor_id
+    if date_from or date_to:
+        query["date"] = {}
+        if date_from:
+            query["date"]["$gte"] = date_from
+        if date_to:
+            query["date"]["$lte"] = date_to
+
+    entries = await db.logbook.find(query, {"_id": 0}).sort("date", 1).to_list(10000)
+
+    for entry in entries:
+        await enrich_vehicle_info(entry)
+        await enrich_instructor_name(entry)
+
+    pdf_buf = _build_logbook_pdf(entries, date_from, date_to)
+    filename = f"kniha-jizd-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.pdf"
+
+    return StreamingResponse(
+        pdf_buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+# ======================== LIVE GPS TRACKING ========================
+
+@api_router.get("/gps/live-positions")
+async def get_live_positions(user: User = Depends(get_current_user)):
+    """Get latest simulated position for all vehicles."""
+    vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(100)
+    positions = []
+
+    for v in vehicles:
+        pos = await db.vehicle_positions.find_one(
+            {"vehicle_id": v["vehicle_id"]}, {"_id": 0}, sort=[("timestamp", -1)]
+        )
+        if pos:
+            parse_datetime_field(pos, "timestamp")
+            positions.append({
+                "vehicle_id": v["vehicle_id"],
+                "vehicle_info": f"{v['brand']} {v['model']} ({v['registration_plate']})",
+                "lat": pos["lat"],
+                "lng": pos["lng"],
+                "speed": pos.get("speed", 0),
+                "heading": pos.get("heading", 0),
+                "ignition": pos.get("ignition", False),
+                "timestamp": pos["timestamp"].isoformat() if isinstance(pos["timestamp"], datetime) else pos["timestamp"],
+            })
+        else:
+            positions.append({
+                "vehicle_id": v["vehicle_id"],
+                "vehicle_info": f"{v['brand']} {v['model']} ({v['registration_plate']})",
+                "lat": None,
+                "lng": None,
+                "speed": 0,
+                "heading": 0,
+                "ignition": False,
+                "timestamp": None,
+            })
+
+    return positions
+
+
+@api_router.post("/gps/simulate-live")
+async def simulate_live_positions(user: User = Depends(get_current_user)):
+    """Generate simulated live position updates for all vehicles (mock real-time)."""
+    vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(100)
+    now = datetime.now(timezone.utc)
+    updated = 0
+
+    for v in vehicles:
+        prev = await db.vehicle_positions.find_one(
+            {"vehicle_id": v["vehicle_id"]}, {"_id": 0}, sort=[("timestamp", -1)]
+        )
+
+        if prev:
+            lat = prev["lat"] + (secrets.randbelow(201) - 100) / 100000
+            lng = prev["lng"] + (secrets.randbelow(201) - 100) / 100000
+        else:
+            lat = 50.0755 + (secrets.randbelow(401) - 200) / 10000
+            lng = 14.4378 + (secrets.randbelow(401) - 200) / 10000
+
+        ignition = secrets.randbelow(10) < 7
+        speed = secrets.randbelow(61) + 20 if ignition else 0
+        heading = secrets.randbelow(360)
+
+        await db.vehicle_positions.insert_one({
+            "vehicle_id": v["vehicle_id"],
+            "lat": lat,
+            "lng": lng,
+            "speed": speed,
+            "heading": heading,
+            "ignition": ignition,
+            "timestamp": now.isoformat()
+        })
+        updated += 1
+
+    return {"message": f"Aktualizovány pozice {updated} vozidel", "count": updated}
+
+
+@api_router.get("/gps/vehicle-history/{vehicle_id}")
+async def get_vehicle_position_history(
+    vehicle_id: str,
+    limit: int = 100,
+    user: User = Depends(get_current_user)
+):
+    """Get position history for a single vehicle."""
+    positions = await db.vehicle_positions.find(
+        {"vehicle_id": vehicle_id}, {"_id": 0}
+    ).sort("timestamp", -1).to_list(limit)
+
+    for p in positions:
+        parse_datetime_field(p, "timestamp")
+
+    return positions
+
 
 # ======================== FILE UPLOAD ========================
 

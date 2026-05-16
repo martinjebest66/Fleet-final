@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { BookOpen, Plus, Trash, Download, Gps } from "@phosphor-icons/react";
+import { BookOpen, Plus, Trash, Download, Gps, FilePdf } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -87,6 +87,15 @@ export default function Logbook() {
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `kniha-jizd-${format(new Date(), "yyyy-MM-dd")}.csv`; a.click();
   };
 
+  const exportToPDF = () => {
+    const params = new URLSearchParams();
+    if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
+    if (filters.instructor_id && filters.instructor_id !== "all") params.append("instructor_id", filters.instructor_id);
+    if (filters.date_from) params.append("date_from", filters.date_from);
+    if (filters.date_to) params.append("date_to", filters.date_to);
+    window.open(`${API}/logbook/export-pdf?${params}`, "_blank");
+  };
+
   const totalDistance = entries.reduce((sum, e) => sum + (e.distance || 0), 0);
 
   if (loading) return <div className="flex items-center justify-center h-64"><div className="loading-spinner"></div></div>;
@@ -99,6 +108,7 @@ export default function Logbook() {
           <p className="text-[#52525B] mt-1">Záznamy o jízdách vozidel</p>
         </div>
         <div className="flex gap-2">
+          <Button variant="outline" onClick={exportToPDF} disabled={entries.length === 0} data-testid="export-pdf-btn"><FilePdf size={20} className="mr-2" />Export PDF</Button>
           <Button variant="outline" onClick={exportToCSV} disabled={entries.length === 0}><Download size={20} className="mr-2" />Export CSV</Button>
           <Button onClick={() => { resetForm(); setShowModal(true); }} className="bg-[#002FA7] hover:bg-[#002480]" data-testid="add-entry-btn"><Plus size={20} className="mr-2" />Nový záznam</Button>
         </div>
