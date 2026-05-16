@@ -7,7 +7,7 @@ Create a fleet management app for a small driving school with vehicle management
 - **Language**: Czech (kniha jízd)
 - **Authentication**: Emergent-managed Google OAuth
 - **Maps**: OpenStreetMap (Leaflet)
-- **GPS Data**: Mock import + simulated real-time (Teltonika FMB003 architecture ready)
+- **GPS Hardware**: Teltonika FMB003 (Codec 8 / 8 Extended over TCP)
 
 ## Architecture
 - **Frontend**: React + Tailwind CSS + Shadcn/UI
@@ -18,16 +18,12 @@ Create a fleet management app for a small driving school with vehicle management
 - **Charts**: Recharts
 - **QR Codes**: qrcode.react
 - **PDF**: reportlab
-
-## User Personas
-1. **Admin/Owner**: Full access to all features, vehicle/instructor management, reports
-2. **Instructor**: Limited access, can use QR codes for fuel/damage reporting
-3. **Public User**: Can submit fuel entries and damage reports via QR code links
+- **GPS Protocol**: Teltonika Codec 8/8E TCP (asyncio server on port 5027)
 
 ## Core Requirements (Static)
 - [x] Vehicle CRUD with instructor assignment
 - [x] Instructor CRUD
-- [x] Driving logbook with filtering and CSV export
+- [x] Driving logbook with filtering, CSV export, PDF export
 - [x] Fuel entry management with QR code mobile forms
 - [x] Damage reporting with photo upload and QR code access
 - [x] Handover protocols for vehicle condition documentation
@@ -36,36 +32,50 @@ Create a fleet management app for a small driving school with vehicle management
 - [x] Reports with custom date ranges
 - [x] PDF export for logbook (Kniha jízd)
 - [x] Live GPS map with real-time vehicle positions
+- [x] Teltonika FMB003 TCP receiver (real protocol implementation)
+- [x] GPS device management (IMEI → vehicle registration)
 
 ## What's Been Implemented
-1. **Authentication**: Google OAuth via Emergent Auth
-2. **Vehicle Management**: Full CRUD, QR code generation for fuel/damage/handover
-3. **Instructor Management**: Full CRUD with vehicle assignment
-4. **Logbook (Kniha jízd)**: Manual entry, GPS sync, CSV export, **PDF export**
-5. **Fuel Entries**: Admin form + public QR code mobile form
-6. **Damage Reports**: Admin form + public QR code mobile form with photo upload
-7. **Handover Protocols**: Vehicle condition with fluid checks, 6-step photo capture
-8. **GPS Tracking**: Mock data import, trip list, map visualization, **live map with simulated positions**
-9. **Reports**: Kilometer statistics with charts, vehicle breakdown
-10. **Dashboard**: KPIs, charts, vehicle status, recent trips
 
-## Code Quality Fixes (2026-04-04)
-- [x] React Hook dependencies properly configured
-- [x] Array index keys replaced with unique string keys
-- [x] Inline chart objects extracted to module-level constants
-- [x] Backend random module replaced with secrets
+### Authentication
+- Google OAuth via Emergent Auth
+
+### Vehicle Management
+- Full CRUD, QR code generation for fuel/damage/handover
+
+### Instructor Management
+- Full CRUD with vehicle assignment
+
+### Logbook (Kniha jízd)
+- Manual entry, GPS sync, CSV export, **PDF export** (Czech landscape A4 format)
+
+### Fuel Entries
+- Admin form + public QR code mobile form
+
+### Damage Reports
+- Admin form + public QR code mobile form with photo upload
+
+### Handover Protocols
+- Vehicle condition with fluid checks, 6-step photo capture
+
+### GPS Tracking
+- Mock data import, trip list, map visualization
+- **Live map** with simulated real-time vehicle positions
+- **Teltonika FMB003 TCP receiver** (Codec 8/8 Extended parser)
+- **GPS device management** (IMEI → vehicle_id registration)
+- **TCP server status** monitoring
+- **Test endpoint** for simulating device connection without hardware
+
+### Reports
+- Kilometer statistics with charts, vehicle breakdown
+
+### Dashboard
+- KPIs, charts, vehicle status, recent trips
 
 ## Component Refactoring (2026-05-16)
-- [x] PublicHandoverForm.jsx split: 557 → ~170 lines + 4 sub-components
-- [x] Vehicles.jsx split: 492 → ~140 lines + 3 sub-components
-- [x] Backend server.py: 13 helper functions extracted
-
-## New Features (2026-05-16)
-- [x] PDF export knihy jízd (reportlab, Czech format, landscape A4)
-- [x] Live GPS mapa s pozicemi vozidel (simulace + auto-refresh)
-- [x] GPS historie tras (tab view)
-- [x] Simulace pohybu vozidel (POST /api/gps/simulate-live)
-- [x] Historie pozic vozidla (GET /api/gps/vehicle-history/{id})
+- [x] PublicHandoverForm.jsx → 4 sub-components
+- [x] Vehicles.jsx → 3 sub-components
+- [x] Backend server.py → 13 helper functions extracted
 
 ## P0 Features (Critical - Done)
 - [x] Authentication
@@ -80,12 +90,18 @@ Create a fleet management app for a small driving school with vehicle management
 - [x] Reports with date ranges
 - [x] PDF export for logbook
 - [x] Live GPS tracking map
+- [x] Teltonika FMB003 TCP receiver
 
 ## P2 Features (Nice to have - Backlog)
-- [ ] Real Teltonika FMB003 integration (TCP/MQTT receiver)
 - [ ] Email notifications for damage reports
 - [ ] Multi-language support
 - [ ] Instructor login (separate from admin)
 - [ ] Fuel consumption analytics
 - [ ] Vehicle maintenance scheduling
 - [ ] Sample data for demo
+
+## Technical Notes
+- TCP server runs on port 5027 (needs to be exposed in production firewall)
+- Teltonika device config: Server IP = your_public_ip, Port = 5027, Protocol = TCP, Codec = Codec 8 Extended
+- GPS positions stored in `vehicle_positions` MongoDB collection
+- Device IMEI mappings stored in `gps_devices` MongoDB collection
