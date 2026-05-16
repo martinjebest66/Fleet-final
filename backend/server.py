@@ -21,6 +21,7 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from teltonika import TeltonikaTCPServer, parse_avl_packet, build_test_avl_packet, build_imei_packet
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -278,6 +279,24 @@ class QRHandover(BaseModel):
     fluid_checks: dict
     photos: List[dict]
     notes: Optional[str] = None
+    created_at: datetime
+
+
+class GPSDeviceCreate(BaseModel):
+    imei: str
+    vehicle_id: str
+    name: Optional[str] = None
+
+
+class GPSDevice(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    device_id: str
+    imei: str
+    vehicle_id: str
+    vehicle_info: Optional[str] = None
+    name: Optional[str] = None
+    last_seen: Optional[datetime] = None
+    status: str = "offline"
     created_at: datetime
 
 # ======================== HELPERS ========================
@@ -1463,6 +1482,153 @@ async def get_vehicle_position_history(
     return positions
 
 
+# ======================== TELTONIKA TCP SERVER ========================
+
+teltonika_server = None
+
+
+async def on_teltonika_records(imei: str, records: list):
+    """Callback invoked by the TCP server when AVL records arrive."""
+    device = await db.gps_devices.find_one({"imei": imei}, {"_id": 0})
+    if not device:
+        logger.warning("Unknown IMEI: %s — data discarded", imei)
+        return
+
+    vehicle_id = device["vehicle_id"]
+    now = datetime.now(timezone.utc)
+
+    for rec in records:
+        gps = rec["gps"]
+        if gps["lat"] == 0.0 and gps["lng"] == 0.0:
+            continue  # skip invalid GPS fix
+
+        await db.vehicle_positions.insert_one({
+            "vehicle_id": vehicle_id,
+            "lat": gps["lat"],
+            "lng": gps["lng"],
+            "speed": gps["speed"],
+            "heading": gps["angle"],
+            "altitude": gps.get("altitude", 0),
+            "satellites": gps.get("satellites", 0),
+            "ignition": gps["speed"] > 0,
+            "source": "teltonika",
+            "imei": imei,
+            "timestamp": rec["timestamp"].isoformat(),
+        })
+
+    await db.gps_devices.update_one(
+        {"imei": imei},
+        {"$set": {"last_seen": now.isoformat(), "status": "online"}}
+    )
+
+
+async def start_teltonika_server():
+    """Start the Teltonika TCP server as a background task."""
+    global teltonika_server
+    port = int(os.environ.get("TELTONIKA_TCP_PORT", "5027"))
+    teltonika_server = TeltonikaTCPServer(host="0.0.0.0", port=port, on_records=on_teltonika_records)
+    await teltonika_server.start()
+
+
+# ── Device management endpoints ──
+
+@api_router.get("/gps/devices")
+async def get_gps_devices(user: User = Depends(get_current_user)):
+    """List all registered GPS tracker devices."""
+    devices = await db.gps_devices.find({}, {"_id": 0}).to_list(100)
+    for d in devices:
+        parse_datetime_field(d, "created_at")
+        parse_datetime_field(d, "last_seen")
+        await enrich_vehicle_info(d)
+    return devices
+
+
+@api_router.post("/gps/devices")
+async def register_gps_device(data: GPSDeviceCreate, user: User = Depends(get_current_user)):
+    """Register a new GPS tracker device (IMEI → vehicle mapping)."""
+    existing = await db.gps_devices.find_one({"imei": data.imei}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Zařízení s tímto IMEI je již registrováno")
+
+    vehicle = await db.vehicles.find_one({"vehicle_id": data.vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+
+    now = datetime.now(timezone.utc)
+    device = {
+        "device_id": f"dev_{uuid.uuid4().hex[:12]}",
+        "imei": data.imei,
+        "vehicle_id": data.vehicle_id,
+        "name": data.name or f"FMB003 ({data.imei[-4:]})",
+        "status": "offline",
+        "last_seen": None,
+        "created_at": now.isoformat(),
+    }
+    await db.gps_devices.insert_one(device)
+
+    device.pop("_id", None)
+    parse_datetime_field(device, "created_at")
+    await enrich_vehicle_info(device)
+    return GPSDevice(**device)
+
+
+@api_router.delete("/gps/devices/{device_id}")
+async def delete_gps_device(device_id: str, user: User = Depends(get_current_user)):
+    """Unregister a GPS tracker device."""
+    result = await db.gps_devices.delete_one({"device_id": device_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Zařízení nenalezeno")
+    return {"message": "Zařízení odstraněno"}
+
+
+@api_router.get("/gps/tcp-status")
+async def get_tcp_status(user: User = Depends(get_current_user)):
+    """Get Teltonika TCP server status."""
+    if teltonika_server:
+        return teltonika_server.stats
+    return {"running": False, "host": "0.0.0.0", "port": 5027, "active_connections": 0, "total_records_received": 0}
+
+
+@api_router.post("/gps/test-teltonika")
+async def test_teltonika_device(
+    imei: str,
+    lat: float = 50.0755,
+    lng: float = 14.4378,
+    speed: int = 45,
+    user: User = Depends(get_current_user)
+):
+    """Simulate a Teltonika device sending a single AVL record (for testing without hardware)."""
+    import asyncio as _asyncio
+
+    port = int(os.environ.get("TELTONIKA_TCP_PORT", "5027"))
+
+    try:
+        reader, writer = await _asyncio.open_connection("127.0.0.1", port)
+
+        # Send IMEI
+        writer.write(build_imei_packet(imei))
+        await writer.drain()
+        resp = await reader.read(1)
+        if resp != b"\x01":
+            writer.close()
+            return {"success": False, "error": "IMEI rejected"}
+
+        # Send AVL packet
+        packet = build_test_avl_packet(lat=lat, lng=lng, speed=speed)
+        writer.write(packet)
+        await writer.drain()
+        ack = await reader.read(4)
+
+        import struct as _struct
+        ack_count = _struct.unpack(">I", ack)[0] if len(ack) == 4 else 0
+        writer.close()
+
+        return {"success": True, "records_acked": ack_count, "imei": imei, "lat": lat, "lng": lng, "speed": speed}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ======================== FILE UPLOAD ========================
 
 @api_router.post("/upload")
@@ -1501,6 +1667,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_teltonika():
+    try:
+        await start_teltonika_server()
+        logger.info("Teltonika TCP server started")
+    except Exception as e:
+        logger.error("Failed to start Teltonika TCP server: %s", e)
+
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    if teltonika_server:
+        await teltonika_server.stop()
     client.close()

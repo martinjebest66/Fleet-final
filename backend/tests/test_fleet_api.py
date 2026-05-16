@@ -1,7 +1,14 @@
 """
-Fleet Management API Tests - Iteration 6
-Tests for new features: PDF export, Live GPS tracking
+Fleet Management API Tests - Iteration 7
+Tests for new features: Teltonika FMB003 GPS tracker TCP receiver with Codec 8/8E parser
 Plus verification of existing protected endpoints
+
+New endpoints tested:
+- GET /api/gps/tcp-status - TCP server status
+- GET /api/gps/devices - List GPS devices
+- POST /api/gps/devices - Register GPS device
+- DELETE /api/gps/devices/{device_id} - Delete GPS device
+- POST /api/gps/test-teltonika - Test device simulation
 """
 import pytest
 import requests
@@ -22,8 +29,46 @@ class TestHealthCheck:
         print("✓ Health check passed - API root returns 200")
 
 
-class TestNewPDFExportEndpoint:
-    """Tests for new PDF export feature"""
+class TestNewGPSDeviceEndpoints:
+    """Tests for new GPS device management endpoints (Teltonika FMB003)"""
+    
+    def test_gps_tcp_status_returns_401_without_auth(self):
+        """GET /api/gps/tcp-status should return 401 without auth"""
+        response = requests.get(f"{BASE_URL}/api/gps/tcp-status")
+        assert response.status_code == 401
+        print("✓ TCP status endpoint exists and requires auth (401)")
+    
+    def test_gps_devices_returns_401_without_auth(self):
+        """GET /api/gps/devices should return 401 without auth"""
+        response = requests.get(f"{BASE_URL}/api/gps/devices")
+        assert response.status_code == 401
+        print("✓ GPS devices list endpoint exists and requires auth (401)")
+    
+    def test_gps_devices_post_returns_401_without_auth(self):
+        """POST /api/gps/devices should return 401 without auth"""
+        response = requests.post(f"{BASE_URL}/api/gps/devices", json={
+            "imei": "352625090000001",
+            "vehicle_id": "test_vehicle",
+            "name": "Test Tracker"
+        })
+        assert response.status_code == 401
+        print("✓ GPS device registration endpoint exists and requires auth (401)")
+    
+    def test_gps_devices_delete_returns_401_without_auth(self):
+        """DELETE /api/gps/devices/{device_id} should return 401 without auth"""
+        response = requests.delete(f"{BASE_URL}/api/gps/devices/test123")
+        assert response.status_code == 401
+        print("✓ GPS device delete endpoint exists and requires auth (401)")
+    
+    def test_gps_test_teltonika_returns_401_without_auth(self):
+        """POST /api/gps/test-teltonika should return 401 without auth"""
+        response = requests.post(f"{BASE_URL}/api/gps/test-teltonika?imei=352625090000001")
+        assert response.status_code == 401
+        print("✓ Test Teltonika endpoint exists and requires auth (401)")
+
+
+class TestPDFExportEndpoint:
+    """Tests for PDF export feature"""
     
     def test_logbook_export_pdf_returns_401_without_auth(self):
         """GET /api/logbook/export-pdf should return 401 without auth"""
@@ -32,8 +77,8 @@ class TestNewPDFExportEndpoint:
         print("✓ PDF export endpoint exists and requires auth (401)")
 
 
-class TestNewLiveGPSEndpoints:
-    """Tests for new Live GPS tracking endpoints"""
+class TestLiveGPSEndpoints:
+    """Tests for Live GPS tracking endpoints"""
     
     def test_gps_live_positions_returns_401_without_auth(self):
         """GET /api/gps/live-positions should return 401 without auth"""
