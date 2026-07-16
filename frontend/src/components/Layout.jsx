@@ -1,4 +1,4 @@
-import { Car, Users, BookOpen, GasPump, Warning, MapPin, ChartBar, Handshake, SignOut, List, Drop } from "@phosphor-icons/react";
+import { Car, Users, BookOpen, GasPump, Warning, MapPin, ChartBar, Handshake, SignOut, List, Drop, Cpu, Engine, Wrench } from "@phosphor-icons/react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../App";
 import { useState, useMemo } from "react";
@@ -13,6 +13,8 @@ const ADMIN_NAV = [
   { name: "Poškození", href: "/damages", icon: Warning },
   { name: "Předávky", href: "/handovers", icon: Handshake },
   { name: "GPS sledování", href: "/gps", icon: MapPin },
+  { name: "OBD Diagnostika", href: "/obd", icon: Engine },
+  { name: "Nastavení trackeru", href: "/tracker-setup", icon: Wrench },
   { name: "Reporty", href: "/reports", icon: ChartBar },
 ];
 

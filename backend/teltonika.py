@@ -193,7 +193,52 @@ def _parse_avl_record(data: bytes, offset: int, codec_id: int):
         "priority": priority,
         "gps": gps,
         "io": io,
+        "obd": extract_obd_data(io.get("io", {})),
     }, offset
+
+
+# ── OBD-II IO element mapper ───────────────────────────────────
+
+# Known Teltonika FMB003 AVL IO IDs for OBD-II / vehicle data
+OBD_IO_MAP = {
+    # Standard OBD-II PIDs
+    32: ("coolant_temp", "°C"),         # Engine Coolant Temperature
+    36: ("engine_rpm", "rpm"),           # Engine RPM
+    48: ("fuel_level", "%"),             # Fuel Level (standard PID 0x2F)
+    30: ("dtc_count", ""),               # Number of DTC codes
+    31: ("mil_status", ""),              # Malfunction Indicator Lamp
+    33: ("fuel_rate", "l/h"),            # Fuel Rate
+    35: ("intake_air_temp", "°C"),       # Intake Air Temperature
+    37: ("throttle_position", "%"),      # Throttle Position
+    38: ("engine_load", "%"),            # Calculated Engine Load
+    39: ("fuel_pressure", "kPa"),        # Fuel Pressure
+    42: ("vehicle_speed", "km/h"),       # OBD Vehicle Speed
+    47: ("ambient_air_temp", "°C"),      # Ambient Air Temperature
+    # Total distance
+    16: ("total_odometer", "m"),         # Total Odometer
+    199: ("trip_odometer", "m"),         # Trip Odometer
+    # Battery / Power
+    66: ("ext_voltage", "mV"),           # External Voltage
+    67: ("battery_voltage", "mV"),       # Battery Voltage
+    68: ("battery_current", "mA"),       # Battery Current
+    # Movement & Ignition
+    239: ("ignition", ""),               # Ignition (0/1)
+    240: ("movement", ""),               # Movement (0/1)
+    # OEM (Codec 8 Extended)
+    390: ("oem_fuel_level", "%"),        # OEM Fuel Level
+    281: ("dtc_list", ""),               # DTC List (string/hex)
+}
+
+
+def extract_obd_data(io_values: dict) -> dict:
+    """Extract known OBD-II parameters from raw IO values."""
+    obd = {}
+    for io_id, value in io_values.items():
+        io_id_int = int(io_id) if isinstance(io_id, str) else io_id
+        if io_id_int in OBD_IO_MAP:
+            param_name, unit = OBD_IO_MAP[io_id_int]
+            obd[param_name] = {"value": value, "unit": unit}
+    return obd
 
 
 # ── Full packet parser ──────────────────────────────────────────

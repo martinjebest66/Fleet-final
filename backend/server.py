@@ -1812,7 +1812,9 @@ async def on_teltonika_records(imei: str, records: list):
         if gps["lat"] == 0.0 and gps["lng"] == 0.0:
             continue  # skip invalid GPS fix
 
-        await db.vehicle_positions.insert_one({
+        obd = rec.get("obd", {})
+
+        position_doc = {
             "vehicle_id": vehicle_id,
             "lat": gps["lat"],
             "lng": gps["lng"],
@@ -1820,11 +1822,31 @@ async def on_teltonika_records(imei: str, records: list):
             "heading": gps["angle"],
             "altitude": gps.get("altitude", 0),
             "satellites": gps.get("satellites", 0),
-            "ignition": gps["speed"] > 0,
+            "ignition": obd.get("ignition", {}).get("value", gps["speed"] > 0),
             "source": "teltonika",
             "imei": imei,
             "timestamp": rec["timestamp"].isoformat(),
-        })
+        }
+
+        # Add OBD data if present
+        if obd:
+            position_doc["obd"] = {k: v["value"] for k, v in obd.items()}
+
+        await db.vehicle_positions.insert_one(position_doc)
+
+        # Store OBD snapshot for diagnostics
+        if obd:
+            await db.vehicle_obd.update_one(
+                {"vehicle_id": vehicle_id},
+                {"$set": {
+                    "vehicle_id": vehicle_id,
+                    "imei": imei,
+                    "data": {k: v for k, v in obd.items()},
+                    "timestamp": rec["timestamp"].isoformat(),
+                    "updated_at": now.isoformat(),
+                }},
+                upsert=True,
+            )
 
     await db.gps_devices.update_one(
         {"imei": imei},
@@ -1937,6 +1959,134 @@ async def test_teltonika_device(
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ======================== OBD-II DIAGNOSTICS ========================
+
+@api_router.get("/obd/vehicles")
+async def get_all_obd_data(user: User = Depends(get_current_user)):
+    """Get latest OBD-II diagnostic data for all vehicles."""
+    obd_docs = await db.vehicle_obd.find({}, {"_id": 0}).to_list(100)
+    for doc in obd_docs:
+        await enrich_vehicle_info(doc)
+        parse_datetime_field(doc, "timestamp")
+        parse_datetime_field(doc, "updated_at")
+    return obd_docs
+
+
+@api_router.get("/obd/vehicle/{vehicle_id}")
+async def get_vehicle_obd_data(vehicle_id: str, user: User = Depends(get_current_user)):
+    """Get latest OBD-II data for a specific vehicle."""
+    doc = await db.vehicle_obd.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
+    if not doc:
+        return {"vehicle_id": vehicle_id, "data": {}, "message": "Žádná OBD data"}
+    await enrich_vehicle_info(doc)
+    return doc
+
+
+@api_router.get("/obd/vehicle/{vehicle_id}/history")
+async def get_vehicle_obd_history(
+    vehicle_id: str,
+    limit: int = 200,
+    user: User = Depends(get_current_user)
+):
+    """Get OBD-II data history from position records for a vehicle."""
+    positions = await db.vehicle_positions.find(
+        {"vehicle_id": vehicle_id, "obd": {"$exists": True}},
+        {"_id": 0, "timestamp": 1, "obd": 1, "speed": 1}
+    ).sort("timestamp", -1).to_list(limit)
+
+    for p in positions:
+        parse_datetime_field(p, "timestamp")
+    return positions
+
+
+# ======================== AUTO-TRIP DETECTION ========================
+
+@api_router.post("/gps/detect-trips/{vehicle_id}")
+async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_current_user)):
+    """Detect trips from position history using ignition on/off transitions."""
+    vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+
+    # Get positions sorted by time
+    positions = await db.vehicle_positions.find(
+        {"vehicle_id": vehicle_id},
+        {"_id": 0}
+    ).sort("timestamp", 1).to_list(50000)
+
+    if len(positions) < 2:
+        return {"message": "Nedostatek dat pro detekci jízd", "trips": 0}
+
+    trips_created = 0
+    trip_start = None
+    trip_points = []
+
+    for pos in positions:
+        ts = pos.get("timestamp")
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts)
+        ignition = pos.get("ignition", pos.get("speed", 0) > 0)
+
+        if ignition and trip_start is None:
+            trip_start = {"time": ts, "lat": pos["lat"], "lng": pos["lng"]}
+            trip_points = [pos]
+        elif ignition and trip_start is not None:
+            trip_points.append(pos)
+        elif not ignition and trip_start is not None and len(trip_points) >= 2:
+            # Trip ended
+            trip_end = trip_points[-1]
+            end_ts = trip_end.get("timestamp")
+            if isinstance(end_ts, str):
+                end_ts = datetime.fromisoformat(end_ts)
+
+            distance = sum(
+                _haversine(trip_points[i]["lat"], trip_points[i]["lng"],
+                           trip_points[i + 1]["lat"], trip_points[i + 1]["lng"])
+                for i in range(len(trip_points) - 1)
+            )
+            if distance < 100:  # skip trips < 100m
+                trip_start = None
+                trip_points = []
+                continue
+
+            speeds = [p.get("speed", 0) for p in trip_points if p.get("speed", 0) > 0]
+            trip_id = f"gps_{uuid.uuid4().hex[:12]}"
+            now = datetime.now(timezone.utc)
+
+            trip_doc = {
+                "trip_id": trip_id,
+                "vehicle_id": vehicle_id,
+                "start_time": trip_start["time"].isoformat() if isinstance(trip_start["time"], datetime) else trip_start["time"],
+                "end_time": end_ts.isoformat() if isinstance(end_ts, datetime) else end_ts,
+                "start_location": {"lat": trip_start["lat"], "lng": trip_start["lng"], "address": "GPS"},
+                "end_location": {"lat": trip_end["lat"], "lng": trip_end["lng"], "address": "GPS"},
+                "route_points": [{"lat": p["lat"], "lng": p["lng"], "timestamp": p.get("timestamp", "")} for p in trip_points],
+                "distance": int(distance),
+                "max_speed": max(speeds) if speeds else 0,
+                "avg_speed": int(sum(speeds) / len(speeds)) if speeds else 0,
+                "synced_to_logbook": False,
+                "auto_detected": True,
+                "created_at": now.isoformat(),
+            }
+            await db.gps_trips.insert_one(trip_doc)
+            trips_created += 1
+
+            trip_start = None
+            trip_points = []
+
+    return {"message": f"Detekováno {trips_created} jízd", "trips": trips_created}
+
+
+def _haversine(lat1, lng1, lat2, lng2):
+    """Calculate distance in meters between two GPS points."""
+    import math
+    R = 6371000
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 # ======================== FILE UPLOAD ========================
