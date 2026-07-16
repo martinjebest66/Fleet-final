@@ -1,50 +1,44 @@
 # Fleet Manager - PRD (Product Requirements Document)
 
 ## Original Problem Statement
-Create a fleet management app for a small driving school with vehicle management, instructor management, driving logbook (kniha jízd), fuel entries via QR code, damage reporting via QR code, handover protocols, GPS tracker data import, and map visualization.
-
-## User Choices
-- **Language**: Czech (kniha jízd)
-- **Authentication**: Admin (email/password + Google OAuth), Instructor (PIN kód)
-- **Maps**: OpenStreetMap (Leaflet)
-- **GPS Hardware**: Teltonika FMB003 (Codec 8 / 8 Extended over TCP)
+Fleet management app for a driving school with vehicle/instructor management, driving logbook (kniha jízd), fuel entries via QR, damage reporting, handover protocols, GPS tracking, and analytics.
 
 ## Architecture
-- **Frontend**: React + Tailwind CSS + Shadcn/UI
-- **Backend**: FastAPI + Motor (async MongoDB)
-- **Database**: MongoDB
+- **Frontend**: React + Tailwind CSS + Shadcn/UI + Recharts + Leaflet
+- **Backend**: FastAPI + Motor (async MongoDB) + reportlab (PDF)
 - **Auth**: JWT (bcrypt + PyJWT) + Emergent Google OAuth
-- **Maps**: Leaflet with OpenStreetMap tiles
-- **PDF**: reportlab
-- **GPS Protocol**: Teltonika Codec 8/8E TCP (asyncio server on port 5027)
+- **GPS Protocol**: Teltonika Codec 8/8E TCP server (asyncio, port 5027)
+- **OBD-II**: 21 mapped parameters from FMB003
 
-## Core Requirements - All Done
-- [x] Vehicle CRUD with instructor assignment
+## All Implemented Features
+- [x] Vehicle CRUD with QR codes
 - [x] Instructor CRUD with PIN management
-- [x] Driving logbook with CSV + PDF export
-- [x] Fuel entry management with QR code mobile forms
-- [x] Damage reporting with photo upload and QR code access
-- [x] Handover protocols with fluid checks and photos
-- [x] GPS trip import (mock) with map visualization
-- [x] Live GPS map with real-time vehicle positions
-- [x] Teltonika FMB003 TCP receiver
+- [x] Driving logbook (CSV + PDF export)
+- [x] Fuel entries (admin + QR mobile forms)
+- [x] Damage reports with photo upload + QR
+- [x] Handover protocols with fluid checks + 6 photos
+- [x] GPS trip import (mock) + trip history on map
+- [x] Live GPS map with vehicle positions
+- [x] Teltonika FMB003 TCP receiver (real Codec 8/8E)
 - [x] GPS device management (IMEI → vehicle)
+- [x] OBD-II diagnostics dashboard (RPM, temp, fuel, DTC, etc.)
+- [x] Auto-trip detection from GPS positions
+- [x] Tracker setup guide (6-step wizard)
 - [x] Dashboard with KPIs and charts
-- [x] Reports with custom date ranges
+- [x] Reports with date ranges
+- [x] Fuel consumption analytics (l/100km, costs, trends)
 - [x] Admin login (email/password + Google OAuth)
 - [x] Instructor PIN login with role-based access
-- [x] Fuel consumption analytics (l/100km, costs, trends)
+- [x] PDF export for logbook
 
-## Authentication System
-- **Admin**: Email/password login + Google OAuth (Emergent Auth)
-- **Instructor**: PIN code login (4-6 digits, set by admin)
-- **JWT**: access_token (12h) + refresh_token (7d) in httponly cookies
-- **Role-based access**: Admin = full access, Instructor = read-only limited navigation
-- **Admin credentials**: admin@autoskola.cz / Admin123!
+## Credentials
+- Admin: admin@autoskola.cz / Admin123!
+- Instructor: inst_aba594d9cd55 / PIN 1234
 
-## P2 Features (Backlog)
+## Backlog
 - [ ] Email notifications for damage reports
 - [ ] Multi-language support
 - [ ] Vehicle maintenance scheduling
-- [ ] Sample data for demo
 - [ ] Geofencing alerts
+- [ ] CSV/GPX import from Ruhavik
+- [ ] Flespi middleware integration
