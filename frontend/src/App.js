@@ -14,6 +14,7 @@ import DamageReports from "./pages/DamageReports";
 import Handovers from "./pages/Handovers";
 import GPSTracking from "./pages/GPSTracking";
 import Reports from "./pages/Reports";
+import FuelAnalytics from "./pages/FuelAnalytics";
 import PublicFuelForm from "./pages/PublicFuelForm";
 import PublicDamageForm from "./pages/PublicDamageForm";
 import PublicHandoverForm from "./pages/PublicHandoverForm";
@@ -181,6 +182,7 @@ const AppRouter = () => {
         <Route path="damages" element={<DamageReports />} />
         <Route path="handovers" element={<Handovers />} />
         <Route path="gps" element={<GPSTracking />} />
+        <Route path="fuel-analytics" element={<FuelAnalytics />} />
         <Route path="reports" element={<Reports />} />
       </Route>
       

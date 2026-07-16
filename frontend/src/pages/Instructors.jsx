@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { User, Plus, Pencil, Trash, Phone, Envelope } from "@phosphor-icons/react";
+import { User, Plus, Pencil, Trash, Phone, Envelope, Key } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -17,7 +17,7 @@ export default function Instructors() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [selectedInstructor, setSelectedInstructor] = useState(null);
   const [formData, setFormData] = useState({
-    name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: []
+    name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: [], pin: ""
   });
 
   const fetchData = useCallback(async () => {
@@ -59,13 +59,13 @@ export default function Instructors() {
 
   const openEditModal = (instructor) => {
     setSelectedInstructor(instructor);
-    setFormData({ name: instructor.name, email: instructor.email, phone: instructor.phone, license_number: instructor.license_number, assigned_vehicle_ids: instructor.assigned_vehicle_ids || [] });
+    setFormData({ name: instructor.name, email: instructor.email, phone: instructor.phone, license_number: instructor.license_number, assigned_vehicle_ids: instructor.assigned_vehicle_ids || [], pin: instructor.pin || "" });
     setShowModal(true);
   };
 
   const resetForm = () => {
     setSelectedInstructor(null);
-    setFormData({ name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: [] });
+    setFormData({ name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: [], pin: "" });
   };
 
   const getAssignedVehicles = (instructor) => {
@@ -97,7 +97,10 @@ export default function Instructors() {
                 </div>
                 <div>
                   <h3 className="font-semibold text-[#18181B]">{instructor.name}</h3>
-                  <p className="text-sm text-[#52525B]">{instructor.license_number}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm text-[#52525B]">{instructor.license_number}</p>
+                    {instructor.pin && <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 flex items-center gap-0.5"><Key size={10} />PIN</span>}
+                  </div>
                 </div>
               </div>
               <div className="space-y-2 text-sm">
@@ -132,6 +135,11 @@ export default function Instructors() {
             <div><Label>Email *</Label><Input type="email" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} required /></div>
             <div><Label>Telefon *</Label><Input value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} required /></div>
             <div><Label>Číslo oprávnění *</Label><Input value={formData.license_number} onChange={(e) => setFormData({ ...formData, license_number: e.target.value })} required /></div>
+            <div>
+              <Label>PIN pro přihlášení</Label>
+              <Input type="text" inputMode="numeric" maxLength={6} value={formData.pin} onChange={(e) => setFormData({ ...formData, pin: e.target.value.replace(/\D/g, "") })} placeholder="4-6 místný PIN (volitelné)" className="font-mono tracking-widest" data-testid="instructor-pin-field" />
+              <p className="text-xs text-[#A1A1AA] mt-1">Nastavte PIN pro přihlášení instruktora do systému</p>
+            </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setShowModal(false)}>Zrušit</Button>
               <Button type="submit" className="bg-[#002FA7] hover:bg-[#002480]">{selectedInstructor ? "Uložit" : "Přidat"}</Button>

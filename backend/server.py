@@ -14,6 +14,8 @@ from datetime import datetime, timezone, timedelta
 import httpx
 import base64
 import secrets
+import bcrypt
+import jwt
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
@@ -98,6 +100,7 @@ class InstructorCreate(BaseModel):
     phone: str
     license_number: str
     assigned_vehicle_ids: List[str] = []
+    pin: Optional[str] = None  # 4-6 digit PIN for instructor login
 
 class Instructor(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -107,6 +110,7 @@ class Instructor(BaseModel):
     phone: str
     license_number: str
     assigned_vehicle_ids: List[str] = []
+    pin: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -299,6 +303,58 @@ class GPSDevice(BaseModel):
     status: str = "offline"
     created_at: datetime
 
+
+class AdminLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class InstructorLoginRequest(BaseModel):
+    instructor_id: str
+    pin: str
+
+
+# ======================== PASSWORD & JWT HELPERS ========================
+
+JWT_ALGORITHM = "HS256"
+
+
+def get_jwt_secret() -> str:
+    return os.environ["JWT_SECRET"]
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+
+
+def create_access_token(user_id: str, role: str) -> str:
+    payload = {
+        "sub": user_id,
+        "role": role,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=12),
+        "type": "access",
+    }
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def create_refresh_token(user_id: str) -> str:
+    payload = {
+        "sub": user_id,
+        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        "type": "refresh",
+    }
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def _set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="none", max_age=43200, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="none", max_age=604800, path="/")
+
+
 # ======================== HELPERS ========================
 
 def parse_datetime_field(doc: dict, field: str):
@@ -359,22 +415,77 @@ async def validate_session(session_token: str) -> dict:
 
 # ======================== AUTH HELPERS ========================
 
-async def get_current_user(request: Request) -> User:
-    """Get current user from session token - REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS"""
+async def _try_jwt_auth(request: Request) -> Optional[User]:
+    """Try JWT-based auth. Returns User or None."""
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            return None
+        user_id = payload["sub"]
+        role = payload.get("role", "admin")
+
+        if role == "instructor":
+            instr = await db.instructors.find_one({"instructor_id": user_id}, {"_id": 0})
+            if not instr:
+                return None
+            parse_datetime_field(instr, "created_at")
+            return User(
+                user_id=instr["instructor_id"],
+                email=instr.get("email", ""),
+                name=instr["name"],
+                role="instructor",
+                created_at=instr["created_at"],
+            )
+        else:
+            user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+            if not user_doc:
+                return None
+            parse_datetime_field(user_doc, "created_at")
+            return User(**user_doc)
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
+
+
+async def _try_session_auth(request: Request) -> Optional[User]:
+    """Try session-token-based auth (Emergent Google OAuth). Returns User or None."""
     session_token = extract_session_token(request)
     if not session_token:
-        raise HTTPException(status_code=401, detail="Nepřihlášen")
+        return None
+    try:
+        session_doc = await validate_session(session_token)
+        user_doc = await db.users.find_one({"user_id": session_doc["user_id"]}, {"_id": 0})
+        if not user_doc:
+            return None
+        parse_datetime_field(user_doc, "created_at")
+        return User(**user_doc)
+    except HTTPException:
+        return None
 
-    session_doc = await validate_session(session_token)
 
-    user_doc = await db.users.find_one(
-        {"user_id": session_doc["user_id"]}, {"_id": 0}
-    )
-    if not user_doc:
-        raise HTTPException(status_code=401, detail="Uživatel nenalezen")
+async def get_current_user(request: Request) -> User:
+    """Get current user from JWT or session token."""
+    user = await _try_jwt_auth(request)
+    if user:
+        return user
+    user = await _try_session_auth(request)
+    if user:
+        return user
+    raise HTTPException(status_code=401, detail="Nepřihlášen")
 
-    parse_datetime_field(user_doc, "created_at")
-    return User(**user_doc)
+
+async def get_admin_user(request: Request) -> User:
+    """Get current user and ensure admin role."""
+    user = await get_current_user(request)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Přístup odmítnut - pouze admin")
+    return user
 
 # ======================== AUTH ROUTES ========================
 
@@ -452,10 +563,65 @@ async def process_session(request: Request, response: Response):
     user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     return UserResponse(**user_doc)
 
-@api_router.get("/auth/me", response_model=UserResponse)
+
+@api_router.post("/auth/login")
+async def admin_login(data: AdminLoginRequest, response: Response):
+    """Admin login with email/password"""
+    email = data.email.lower().strip()
+    user_doc = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user_doc or not user_doc.get("password_hash"):
+        raise HTTPException(status_code=401, detail="Neplatné přihlašovací údaje")
+
+    if not verify_password(data.password, user_doc["password_hash"]):
+        raise HTTPException(status_code=401, detail="Neplatné přihlašovací údaje")
+
+    access = create_access_token(user_doc["user_id"], user_doc.get("role", "admin"))
+    refresh = create_refresh_token(user_doc["user_id"])
+    _set_auth_cookies(response, access, refresh)
+
+    return {
+        "user_id": user_doc["user_id"],
+        "email": user_doc["email"],
+        "name": user_doc["name"],
+        "role": user_doc.get("role", "admin"),
+    }
+
+
+@api_router.post("/auth/instructor-login")
+async def instructor_login(data: InstructorLoginRequest, response: Response):
+    """Instructor login with ID + PIN"""
+    instructor = await db.instructors.find_one(
+        {"instructor_id": data.instructor_id}, {"_id": 0}
+    )
+    if not instructor:
+        raise HTTPException(status_code=401, detail="Neplatné přihlašovací údaje")
+    if not instructor.get("pin"):
+        raise HTTPException(status_code=401, detail="Instruktor nemá nastavený PIN")
+    if instructor["pin"] != data.pin:
+        raise HTTPException(status_code=401, detail="Neplatný PIN")
+
+    access = create_access_token(instructor["instructor_id"], "instructor")
+    refresh = create_refresh_token(instructor["instructor_id"])
+    _set_auth_cookies(response, access, refresh)
+
+    return {
+        "user_id": instructor["instructor_id"],
+        "email": instructor.get("email", ""),
+        "name": instructor["name"],
+        "role": "instructor",
+    }
+
+
+@api_router.get("/auth/me")
 async def get_me(user: User = Depends(get_current_user)):
     """Get current authenticated user"""
-    return UserResponse(**user.model_dump())
+    return {
+        "user_id": user.user_id,
+        "email": user.email,
+        "name": user.name,
+        "picture": user.picture,
+        "role": user.role,
+    }
 
 @api_router.post("/auth/logout")
 async def logout(request: Request, response: Response):
@@ -463,9 +629,50 @@ async def logout(request: Request, response: Response):
     session_token = request.cookies.get("session_token")
     if session_token:
         await db.user_sessions.delete_many({"session_token": session_token})
-    
+
     response.delete_cookie(key="session_token", path="/")
+    response.delete_cookie(key="access_token", path="/")
+    response.delete_cookie(key="refresh_token", path="/")
     return {"message": "Odhlášeno"}
+
+
+@api_router.post("/auth/refresh")
+async def refresh_token(request: Request, response: Response):
+    """Refresh access token using refresh token"""
+    token = request.cookies.get("refresh_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Chybí refresh token")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Neplatný token")
+        user_id = payload["sub"]
+
+        # Determine role
+        user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+        if user_doc:
+            role = user_doc.get("role", "admin")
+        else:
+            instr = await db.instructors.find_one({"instructor_id": user_id}, {"_id": 0})
+            role = "instructor" if instr else "admin"
+
+        access = create_access_token(user_id, role)
+        response.set_cookie(key="access_token", value=access, httponly=True, secure=True, samesite="none", max_age=43200, path="/")
+        return {"message": "Token obnoven"}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Refresh token vypršel")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Neplatný refresh token")
+
+
+@api_router.get("/auth/instructors-list")
+async def get_instructors_for_login():
+    """Public endpoint - list instructors for PIN login (only id + name, no sensitive data)."""
+    instructors = await db.instructors.find(
+        {"pin": {"$exists": True, "$ne": None}},
+        {"_id": 0, "instructor_id": 1, "name": 1}
+    ).to_list(100)
+    return instructors
 
 # ======================== VEHICLE ROUTES ========================
 
@@ -493,7 +700,7 @@ async def get_vehicle(vehicle_id: str, user: User = Depends(get_current_user)):
     return Vehicle(**vehicle)
 
 @api_router.post("/vehicles", response_model=Vehicle)
-async def create_vehicle(data: VehicleCreate, user: User = Depends(get_current_user)):
+async def create_vehicle(data: VehicleCreate, user: User = Depends(get_admin_user)):
     """Create a new vehicle"""
     vehicle_id = f"veh_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
@@ -514,7 +721,7 @@ async def create_vehicle(data: VehicleCreate, user: User = Depends(get_current_u
     return Vehicle(**vehicle)
 
 @api_router.put("/vehicles/{vehicle_id}", response_model=Vehicle)
-async def update_vehicle(vehicle_id: str, data: VehicleCreate, user: User = Depends(get_current_user)):
+async def update_vehicle(vehicle_id: str, data: VehicleCreate, user: User = Depends(get_admin_user)):
     """Update a vehicle"""
     vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
     if not vehicle:
@@ -537,7 +744,7 @@ async def update_vehicle(vehicle_id: str, data: VehicleCreate, user: User = Depe
     return Vehicle(**updated)
 
 @api_router.delete("/vehicles/{vehicle_id}")
-async def delete_vehicle(vehicle_id: str, user: User = Depends(get_current_user)):
+async def delete_vehicle(vehicle_id: str, user: User = Depends(get_admin_user)):
     """Delete a vehicle"""
     result = await db.vehicles.delete_one({"vehicle_id": vehicle_id})
     if result.deleted_count == 0:
@@ -597,7 +804,7 @@ async def get_instructor(instructor_id: str, user: User = Depends(get_current_us
     return Instructor(**instructor)
 
 @api_router.post("/instructors", response_model=Instructor)
-async def create_instructor(data: InstructorCreate, user: User = Depends(get_current_user)):
+async def create_instructor(data: InstructorCreate, user: User = Depends(get_admin_user)):
     """Create a new instructor"""
     instructor_id = f"inst_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
@@ -615,7 +822,7 @@ async def create_instructor(data: InstructorCreate, user: User = Depends(get_cur
     return Instructor(**instructor)
 
 @api_router.put("/instructors/{instructor_id}", response_model=Instructor)
-async def update_instructor(instructor_id: str, data: InstructorCreate, user: User = Depends(get_current_user)):
+async def update_instructor(instructor_id: str, data: InstructorCreate, user: User = Depends(get_admin_user)):
     """Update an instructor"""
     instructor = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
     if not instructor:
@@ -638,7 +845,7 @@ async def update_instructor(instructor_id: str, data: InstructorCreate, user: Us
     return Instructor(**updated)
 
 @api_router.delete("/instructors/{instructor_id}")
-async def delete_instructor(instructor_id: str, user: User = Depends(get_current_user)):
+async def delete_instructor(instructor_id: str, user: User = Depends(get_admin_user)):
     """Delete an instructor"""
     result = await db.instructors.delete_one({"instructor_id": instructor_id})
     if result.deleted_count == 0:
@@ -1273,6 +1480,109 @@ async def get_km_statistics(
         "vehicle_stats": vehicle_stats
     }
 
+
+@api_router.get("/reports/fuel-analytics")
+async def fuel_consumption_analytics(
+    vehicle_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    user: User = Depends(get_current_user)
+):
+    """Fuel consumption analytics - l/100km, cost, trends per vehicle."""
+    fuel_query = {}
+    if vehicle_id:
+        fuel_query["vehicle_id"] = vehicle_id
+    if date_from or date_to:
+        fuel_query["date"] = {}
+        if date_from:
+            fuel_query["date"]["$gte"] = date_from
+        if date_to:
+            fuel_query["date"]["$lte"] = date_to
+
+    fuel_entries = await db.fuel_entries.find(fuel_query, {"_id": 0}).sort("date", 1).to_list(10000)
+    vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(100)
+    vehicle_map = {v["vehicle_id"]: v for v in vehicles}
+
+    # Per-vehicle stats
+    vehicle_fuel_data = {}
+    for entry in fuel_entries:
+        vid = entry["vehicle_id"]
+        if vid not in vehicle_fuel_data:
+            v = vehicle_map.get(vid, {})
+            vehicle_fuel_data[vid] = {
+                "vehicle_id": vid,
+                "vehicle_info": f"{v.get('brand', '?')} {v.get('model', '?')} ({v.get('registration_plate', '?')})",
+                "entries": [],
+                "total_liters": 0,
+                "total_cost": 0,
+                "odometer_readings": [],
+            }
+        vd = vehicle_fuel_data[vid]
+        liters = entry.get("amount_liters", entry.get("amount", 0))
+        cost = entry.get("total_price", entry.get("price", 0))
+        odo = entry.get("odometer", 0)
+
+        vd["entries"].append({
+            "date": entry.get("date", ""),
+            "liters": liters,
+            "cost": cost,
+            "odometer": odo,
+        })
+        vd["total_liters"] += liters
+        vd["total_cost"] += cost
+        if odo > 0:
+            vd["odometer_readings"].append(odo)
+
+    # Compute consumption
+    vehicle_stats = []
+    total_liters_all = 0
+    total_cost_all = 0
+    total_km_all = 0
+
+    for vid, vd in vehicle_fuel_data.items():
+        readings = sorted(vd["odometer_readings"])
+        km_driven = (readings[-1] - readings[0]) if len(readings) >= 2 else 0
+        consumption = round((vd["total_liters"] / km_driven) * 100, 2) if km_driven > 0 else 0
+        cost_per_km = round(vd["total_cost"] / km_driven, 2) if km_driven > 0 else 0
+
+        total_liters_all += vd["total_liters"]
+        total_cost_all += vd["total_cost"]
+        total_km_all += km_driven
+
+        # Monthly trend
+        monthly = {}
+        for e in vd["entries"]:
+            month = e["date"][:7] if e["date"] else "?"
+            if month not in monthly:
+                monthly[month] = {"liters": 0, "cost": 0}
+            monthly[month]["liters"] += e["liters"]
+            monthly[month]["cost"] += e["cost"]
+
+        vehicle_stats.append({
+            "vehicle_id": vid,
+            "vehicle_info": vd["vehicle_info"],
+            "total_liters": round(vd["total_liters"], 2),
+            "total_cost": round(vd["total_cost"], 2),
+            "km_driven": km_driven,
+            "consumption_per_100km": consumption,
+            "cost_per_km": cost_per_km,
+            "fill_count": len(vd["entries"]),
+            "monthly_trend": [{"month": k, **v} for k, v in sorted(monthly.items())],
+        })
+
+    avg_consumption = round((total_liters_all / total_km_all) * 100, 2) if total_km_all > 0 else 0
+
+    return {
+        "summary": {
+            "total_liters": round(total_liters_all, 2),
+            "total_cost": round(total_cost_all, 2),
+            "total_km": total_km_all,
+            "avg_consumption_per_100km": avg_consumption,
+            "vehicle_count": len(vehicle_stats),
+        },
+        "vehicle_stats": vehicle_stats,
+    }
+
 # ======================== PDF EXPORT ========================
 
 def _build_logbook_pdf(entries: list, date_from: str, date_to: str) -> io.BytesIO:
@@ -1667,13 +1977,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+async def seed_admin():
+    """Seed admin user on startup."""
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@autoskola.cz").lower()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin123!")
+    existing = await db.users.find_one({"email": admin_email}, {"_id": 0})
+    if existing is None:
+        hashed = hash_password(admin_password)
+        await db.users.insert_one({
+            "user_id": f"user_{uuid.uuid4().hex[:12]}",
+            "email": admin_email,
+            "name": "Admin",
+            "password_hash": hashed,
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        logger.info("Admin account seeded: %s", admin_email)
+    elif not existing.get("password_hash"):
+        hashed = hash_password(admin_password)
+        await db.users.update_one(
+            {"email": admin_email},
+            {"$set": {"password_hash": hashed}}
+        )
+        logger.info("Admin password_hash added to existing account: %s", admin_email)
+    elif not verify_password(admin_password, existing["password_hash"]):
+        hashed = hash_password(admin_password)
+        await db.users.update_one(
+            {"email": admin_email},
+            {"$set": {"password_hash": hashed}}
+        )
+        logger.info("Admin password updated: %s", admin_email)
+
+
 @app.on_event("startup")
-async def startup_teltonika():
+async def startup_tasks():
     try:
+        await seed_admin()
         await start_teltonika_server()
-        logger.info("Teltonika TCP server started")
+        logger.info("Startup complete: admin seeded, Teltonika TCP started")
     except Exception as e:
-        logger.error("Failed to start Teltonika TCP server: %s", e)
+        logger.error("Startup error: %s", e)
 
 
 @app.on_event("shutdown")
