@@ -17,6 +17,8 @@ import Reports from "./pages/Reports";
 import FuelAnalytics from "./pages/FuelAnalytics";
 import TrackerSetup from "./pages/TrackerSetup";
 import OBDDiagnostics from "./pages/OBDDiagnostics";
+import Maintenance from "./pages/Maintenance";
+import RuhavikImport from "./pages/RuhavikImport";
 import PublicFuelForm from "./pages/PublicFuelForm";
 import PublicDamageForm from "./pages/PublicDamageForm";
 import PublicHandoverForm from "./pages/PublicHandoverForm";
@@ -187,6 +189,8 @@ const AppRouter = () => {
         <Route path="fuel-analytics" element={<FuelAnalytics />} />
         <Route path="tracker-setup" element={<TrackerSetup />} />
         <Route path="obd" element={<OBDDiagnostics />} />
+        <Route path="maintenance" element={<Maintenance />} />
+        <Route path="ruhavik-import" element={<RuhavikImport />} />
         <Route path="reports" element={<Reports />} />
       </Route>
       

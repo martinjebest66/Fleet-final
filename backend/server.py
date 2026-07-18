@@ -24,6 +24,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from teltonika import TeltonikaTCPServer, parse_avl_packet, build_test_avl_packet, build_imei_packet
+import resend
+import asyncio
+import xml.etree.ElementTree as ET
+import csv as csv_module
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -314,6 +318,39 @@ class InstructorLoginRequest(BaseModel):
     pin: str
 
 
+# Maintenance models
+class MaintenanceItemCreate(BaseModel):
+    vehicle_id: str
+    type: str  # STK, olej, pneumatiky, brzdy, rozvodový řemen, vlastní
+    custom_label: Optional[str] = None
+    last_done_date: Optional[str] = None
+    last_done_odometer: Optional[int] = None
+    interval_months: Optional[int] = None
+    interval_km: Optional[int] = None
+    next_due_date: Optional[str] = None
+    next_due_odometer: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class MaintenanceItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    maintenance_id: str
+    vehicle_id: str
+    vehicle_info: Optional[str] = None
+    type: str
+    custom_label: Optional[str] = None
+    last_done_date: Optional[str] = None
+    last_done_odometer: Optional[int] = None
+    interval_months: Optional[int] = None
+    interval_km: Optional[int] = None
+    next_due_date: Optional[str] = None
+    next_due_odometer: Optional[int] = None
+    status: str = "ok"  # ok, blíží se, po termínu
+    notes: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # ======================== PASSWORD & JWT HELPERS ========================
 
 JWT_ALGORITHM = "HS256"
@@ -386,6 +423,70 @@ async def enrich_instructor_name(doc: dict):
         instructor = await db.instructors.find_one({"instructor_id": doc["instructor_id"]}, {"_id": 0})
         if instructor:
             doc["instructor_name"] = instructor["name"]
+
+
+# ======================== EMAIL NOTIFICATION HELPER ========================
+
+resend_api_key = os.environ.get("RESEND_API_KEY")
+if resend_api_key:
+    resend.api_key = resend_api_key
+
+sender_email = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
+
+
+async def send_damage_notification(damage_report: dict, vehicle_info: str):
+    """Send email notification to admin when a damage report is created."""
+    if not resend_api_key:
+        logger.info("RESEND_API_KEY not set, skipping email notification")
+        return
+    admin_email = os.environ.get("ADMIN_EMAIL")
+    if not admin_email:
+        return
+    severity_colors = {"nízká": "#16A34A", "střední": "#FFC000", "vysoká": "#FF2400"}
+    color = severity_colors.get(damage_report.get("severity", ""), "#52525B")
+    html = f"""
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;border:1px solid #E4E4E7;border-radius:8px;overflow:hidden;">
+      <div style="background:#002FA7;color:white;padding:20px;">
+        <h2 style="margin:0;">Nové hlášení poškození</h2>
+      </div>
+      <div style="padding:20px;">
+        <p><strong>Vozidlo:</strong> {vehicle_info}</p>
+        <p><strong>Závažnost:</strong> <span style="color:{color};font-weight:bold;">{damage_report.get('severity','')}</span></p>
+        <p><strong>Popis:</strong> {damage_report.get('description','')}</p>
+        <p><strong>Umístění:</strong> {damage_report.get('location_on_vehicle','')}</p>
+        <p><strong>Nahlásil:</strong> {damage_report.get('reported_by','Neznámý')}</p>
+        <p style="color:#52525B;font-size:12px;">Datum: {datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M')}</p>
+      </div>
+    </div>
+    """
+    try:
+        params = {
+            "from": sender_email,
+            "to": [admin_email],
+            "subject": f"[Fleet Manager] Poškození: {vehicle_info} ({damage_report.get('severity','')})",
+            "html": html
+        }
+        await asyncio.to_thread(resend.Emails.send, params)
+        logger.info("Damage notification email sent to %s", admin_email)
+    except Exception as e:
+        logger.error("Failed to send damage email: %s", e)
+
+
+def compute_maintenance_status(item: dict) -> str:
+    """Compute status for a maintenance item: ok, blíží se, po termínu."""
+    today = datetime.now(timezone.utc).date()
+    next_date = item.get("next_due_date")
+    if next_date:
+        try:
+            due = datetime.fromisoformat(next_date).date() if isinstance(next_date, str) else next_date
+            diff = (due - today).days
+            if diff < 0:
+                return "po termínu"
+            if diff <= 30:
+                return "blíží se"
+        except (ValueError, TypeError):
+            pass
+    return "ok"
 
 
 def extract_session_token(request: Request) -> str:
@@ -1046,6 +1147,9 @@ async def create_damage_report(data: DamageReportCreate, user: User = Depends(ge
     
     await enrich_vehicle_info(report)
     
+    # Send email notification
+    asyncio.create_task(send_damage_notification(report, report.get("vehicle_info", "")))
+    
     return DamageReport(**report)
 
 @api_router.put("/damages/{damage_id}/status")
@@ -1086,6 +1190,10 @@ async def create_public_damage_report(data: DamageReportCreate):
     }
     
     await db.damage_reports.insert_one(report)
+    
+    # Send email notification
+    vehicle_info = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+    asyncio.create_task(send_damage_notification(report, vehicle_info))
     
     return {"message": "Poškození úspěšně nahlášeno", "damage_id": damage_id}
 
@@ -2090,6 +2198,271 @@ def _haversine(lat1, lng1, lat2, lng2):
 
 
 # ======================== FILE UPLOAD ========================
+
+# ======================== MAINTENANCE ROUTES ========================
+
+@api_router.get("/maintenance")
+async def get_maintenance_items(
+    vehicle_id: Optional[str] = None,
+    status: Optional[str] = None,
+    user: User = Depends(get_current_user)
+):
+    """Get maintenance items with optional filters"""
+    query = {}
+    if vehicle_id:
+        query["vehicle_id"] = vehicle_id
+    items = await db.maintenance.find(query, {"_id": 0}).sort("next_due_date", 1).to_list(1000)
+    results = []
+    for item in items:
+        parse_datetime_field(item, "created_at")
+        parse_datetime_field(item, "updated_at")
+        await enrich_vehicle_info(item)
+        item["status"] = compute_maintenance_status(item)
+        if status and item["status"] != status:
+            continue
+        results.append(MaintenanceItem(**item))
+    return results
+
+
+@api_router.post("/maintenance", response_model=MaintenanceItem)
+async def create_maintenance_item(data: MaintenanceItemCreate, user: User = Depends(get_admin_user)):
+    """Create a new maintenance item"""
+    maintenance_id = f"mnt_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    item = {
+        "maintenance_id": maintenance_id,
+        **data.model_dump(),
+        "status": "ok",
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat()
+    }
+    item["status"] = compute_maintenance_status(item)
+    await db.maintenance.insert_one(item)
+    item["created_at"] = now
+    item["updated_at"] = now
+    await enrich_vehicle_info(item)
+    return MaintenanceItem(**item)
+
+
+@api_router.put("/maintenance/{maintenance_id}", response_model=MaintenanceItem)
+async def update_maintenance_item(maintenance_id: str, data: MaintenanceItemCreate, user: User = Depends(get_admin_user)):
+    """Update a maintenance item"""
+    existing = await db.maintenance.find_one({"maintenance_id": maintenance_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Záznam údržby nenalezen")
+    now = datetime.now(timezone.utc)
+    update_data = {**data.model_dump(), "updated_at": now.isoformat()}
+    await db.maintenance.update_one({"maintenance_id": maintenance_id}, {"$set": update_data})
+    updated = await db.maintenance.find_one({"maintenance_id": maintenance_id}, {"_id": 0})
+    parse_datetime_field(updated, "created_at")
+    updated["updated_at"] = now
+    updated["status"] = compute_maintenance_status(updated)
+    await enrich_vehicle_info(updated)
+    return MaintenanceItem(**updated)
+
+
+@api_router.delete("/maintenance/{maintenance_id}")
+async def delete_maintenance_item(maintenance_id: str, user: User = Depends(get_admin_user)):
+    """Delete a maintenance item"""
+    result = await db.maintenance.delete_one({"maintenance_id": maintenance_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Záznam údržby nenalezen")
+    return {"message": "Záznam údržby smazán"}
+
+
+@api_router.get("/maintenance/summary")
+async def get_maintenance_summary(user: User = Depends(get_current_user)):
+    """Get maintenance summary with upcoming/overdue counts"""
+    items = await db.maintenance.find({}, {"_id": 0}).to_list(1000)
+    total = len(items)
+    overdue = 0
+    upcoming = 0
+    ok_count = 0
+    for item in items:
+        s = compute_maintenance_status(item)
+        if s == "po termínu":
+            overdue += 1
+        elif s == "blíží se":
+            upcoming += 1
+        else:
+            ok_count += 1
+    return {"total": total, "overdue": overdue, "upcoming": upcoming, "ok": ok_count}
+
+
+# ======================== RUHAVIK IMPORT ROUTES ========================
+
+def _parse_gpx_file(content: str) -> list:
+    """Parse GPX file and extract track points."""
+    points = []
+    try:
+        root = ET.fromstring(content)
+        ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+        # Try standard GPX 1.1 namespace
+        trkpts = root.findall(".//gpx:trkpt", ns)
+        if not trkpts:
+            # Try without namespace
+            trkpts = root.findall(".//{http://www.topografix.com/GPX/1/1}trkpt")
+        if not trkpts:
+            trkpts = root.findall(".//trkpt")
+        for pt in trkpts:
+            lat = float(pt.get("lat", 0))
+            lng = float(pt.get("lon", 0))
+            time_el = pt.find("gpx:time", ns) or pt.find("{http://www.topografix.com/GPX/1/1}time") or pt.find("time")
+            speed_el = pt.find("gpx:speed", ns) or pt.find("{http://www.topografix.com/GPX/1/1}speed") or pt.find("speed")
+            timestamp = time_el.text if time_el is not None else None
+            speed = float(speed_el.text) * 3.6 if speed_el is not None else 0  # m/s -> km/h
+            if lat and lng:
+                points.append({"lat": lat, "lng": lng, "timestamp": timestamp, "speed": speed})
+    except ET.ParseError as e:
+        logger.error("GPX parse error: %s", e)
+    return points
+
+
+def _parse_csv_ruhavik(content: str) -> list:
+    """Parse Ruhavik CSV export. Columns: timestamp, lat, lng, speed, ..."""
+    points = []
+    reader = csv_module.DictReader(io.StringIO(content))
+    field_map = {}
+    if reader.fieldnames:
+        lower_fields = {f.lower().strip(): f for f in reader.fieldnames}
+        for key in ["latitude", "lat"]:
+            if key in lower_fields:
+                field_map["lat"] = lower_fields[key]
+                break
+        for key in ["longitude", "lng", "lon"]:
+            if key in lower_fields:
+                field_map["lng"] = lower_fields[key]
+                break
+        for key in ["time", "timestamp", "datetime", "date"]:
+            if key in lower_fields:
+                field_map["time"] = lower_fields[key]
+                break
+        for key in ["speed", "velocity"]:
+            if key in lower_fields:
+                field_map["speed"] = lower_fields[key]
+                break
+    for row in reader:
+        try:
+            lat = float(row.get(field_map.get("lat", "latitude"), 0))
+            lng = float(row.get(field_map.get("lng", "longitude"), 0))
+            timestamp = row.get(field_map.get("time", "timestamp"), "")
+            speed = float(row.get(field_map.get("speed", "speed"), 0) or 0)
+            if lat and lng:
+                points.append({"lat": lat, "lng": lng, "timestamp": timestamp, "speed": speed})
+        except (ValueError, TypeError):
+            continue
+    return points
+
+
+def _points_to_trips(points: list, vehicle_id: str, min_gap_minutes: int = 15) -> list:
+    """Split sorted points into trips based on time gaps."""
+    if not points:
+        return []
+    # Sort by timestamp
+    valid_points = [p for p in points if p.get("timestamp")]
+    if not valid_points:
+        # If no timestamps, create one trip from all points
+        now = datetime.now(timezone.utc)
+        return [{
+            "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
+            "vehicle_id": vehicle_id,
+            "start_time": now.isoformat(),
+            "end_time": now.isoformat(),
+            "start_location": {"lat": points[0]["lat"], "lng": points[0]["lng"], "address": f"{points[0]['lat']:.4f}, {points[0]['lng']:.4f}"},
+            "end_location": {"lat": points[-1]["lat"], "lng": points[-1]["lng"], "address": f"{points[-1]['lat']:.4f}, {points[-1]['lng']:.4f}"},
+            "route_points": [{"lat": p["lat"], "lng": p["lng"], "timestamp": now.isoformat()} for p in points],
+            "distance": 0,
+            "max_speed": int(max((p.get("speed", 0) for p in points), default=0)),
+            "avg_speed": int(sum(p.get("speed", 0) for p in points) / len(points)) if points else 0,
+            "synced_to_logbook": False,
+            "created_at": now.isoformat()
+        }]
+    valid_points.sort(key=lambda p: p["timestamp"])
+    trips = []
+    current_trip_points = [valid_points[0]]
+    for i in range(1, len(valid_points)):
+        try:
+            prev_t = datetime.fromisoformat(valid_points[i - 1]["timestamp"].replace("Z", "+00:00"))
+            curr_t = datetime.fromisoformat(valid_points[i]["timestamp"].replace("Z", "+00:00"))
+            gap = (curr_t - prev_t).total_seconds() / 60
+        except (ValueError, TypeError):
+            gap = 0
+        if gap > min_gap_minutes:
+            trips.append(current_trip_points)
+            current_trip_points = []
+        current_trip_points.append(valid_points[i])
+    if current_trip_points:
+        trips.append(current_trip_points)
+
+    now = datetime.now(timezone.utc)
+    result = []
+    for trip_pts in trips:
+        if len(trip_pts) < 2:
+            continue
+        start = trip_pts[0]
+        end = trip_pts[-1]
+        speeds = [p.get("speed", 0) for p in trip_pts]
+        # Estimate distance using Haversine approximation
+        total_dist = 0
+        for j in range(1, len(trip_pts)):
+            dlat = (trip_pts[j]["lat"] - trip_pts[j - 1]["lat"]) * 111320
+            dlng = (trip_pts[j]["lng"] - trip_pts[j - 1]["lng"]) * 111320 * 0.65
+            total_dist += (dlat ** 2 + dlng ** 2) ** 0.5
+        result.append({
+            "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
+            "vehicle_id": vehicle_id,
+            "start_time": start["timestamp"],
+            "end_time": end["timestamp"],
+            "start_location": {"lat": start["lat"], "lng": start["lng"], "address": f"{start['lat']:.4f}, {start['lng']:.4f}"},
+            "end_location": {"lat": end["lat"], "lng": end["lng"], "address": f"{end['lat']:.4f}, {end['lng']:.4f}"},
+            "route_points": [{"lat": p["lat"], "lng": p["lng"], "timestamp": p["timestamp"]} for p in trip_pts],
+            "distance": int(total_dist),
+            "max_speed": int(max(speeds, default=0)),
+            "avg_speed": int(sum(speeds) / len(speeds)) if speeds else 0,
+            "synced_to_logbook": False,
+            "created_at": now.isoformat()
+        })
+    return result
+
+
+@api_router.post("/gps/import-ruhavik")
+async def import_ruhavik_data(
+    vehicle_id: str = Form(...),
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user)
+):
+    """Import GPS data from Ruhavik CSV or GPX file"""
+    vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+
+    content = (await file.read()).decode("utf-8", errors="ignore")
+    filename = (file.filename or "").lower()
+
+    if filename.endswith(".gpx"):
+        points = _parse_gpx_file(content)
+    elif filename.endswith(".csv"):
+        points = _parse_csv_ruhavik(content)
+    else:
+        raise HTTPException(status_code=400, detail="Nepodporovaný formát. Nahrajte .csv nebo .gpx soubor.")
+
+    if not points:
+        raise HTTPException(status_code=400, detail="Soubor neobsahuje žádné platné GPS body.")
+
+    trips = _points_to_trips(points, vehicle_id)
+
+    for trip in trips:
+        await db.gps_trips.insert_one(trip)
+
+    return {
+        "message": f"Importováno {len(trips)} tras z {len(points)} bodů",
+        "trips_count": len(trips),
+        "points_count": len(points),
+        "trip_ids": [t["trip_id"] for t in trips]
+    }
+
+
+# ======================== UPLOAD & ROOT ========================
 
 @api_router.post("/upload")
 async def upload_file(file: UploadFile = File(...), user: User = Depends(get_current_user)):
