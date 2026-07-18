@@ -9,6 +9,7 @@ Fleet management app for a driving school with vehicle/instructor management, dr
 - **Auth**: JWT (bcrypt + PyJWT) + Emergent Google OAuth
 - **GPS Protocol**: Teltonika Codec 8/8E TCP server (asyncio, port 5027)
 - **OBD-II**: 21 mapped parameters from FMB003
+- **Deployment**: Docker (multi-stage) + docker-compose + Nginx reverse proxy
 
 ## All Implemented Features
 - [x] Vehicle CRUD with QR codes
@@ -30,10 +31,16 @@ Fleet management app for a driving school with vehicle/instructor management, dr
 - [x] Admin login (email/password + Google OAuth)
 - [x] Instructor PIN login with role-based access
 - [x] PDF export for logbook
+- [x] Docker deployment files (Dockerfile, docker-compose, nginx, guide)
 
 ## Credentials
 - Admin: admin@autoskola.cz / Admin123!
 - Instructor: inst_aba594d9cd55 / PIN 1234
+
+## Deployment
+- Azure VM (Ubuntu 24.04 LTS) recommended
+- Ports: 80 (HTTP), 5027 (GPS TCP), 22 (SSH)
+- Guide: `/deploy/AZURE_DEPLOY_GUIDE.md`
 
 ## Backlog
 - [ ] Email notifications for damage reports
@@ -41,4 +48,5 @@ Fleet management app for a driving school with vehicle/instructor management, dr
 - [ ] Vehicle maintenance scheduling
 - [ ] Geofencing alerts
 - [ ] CSV/GPX import from Ruhavik
-- [ ] Flespi middleware integration
+- [ ] HTTPS via Let's Encrypt (documented in guide)
+- [ ] Split server.py into /backend/routes/ (refactoring)

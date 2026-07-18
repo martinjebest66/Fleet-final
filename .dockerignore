@@ -1,0 +1,13 @@
+node_modules
+frontend/node_modules
+frontend/build
+frontend/.env
+backend/.env
+__pycache__
+*.pyc
+.git
+.emergent
+test_reports
+memory
+*.log
+deploy/.env.example
