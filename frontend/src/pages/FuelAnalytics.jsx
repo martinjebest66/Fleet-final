@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Label } from "../components/ui/label";
 import { Input } from "../components/ui/input";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line } from "recharts";
+import { toast } from "sonner";
 
 export default function FuelAnalytics() {
   const [data, setData] = useState(null);
@@ -17,7 +18,7 @@ export default function FuelAnalytics() {
     try {
       const res = await axios.get(`${API}/vehicles`, { withCredentials: true });
       setVehicles(res.data);
-    } catch { /* */ }
+    } catch { toast.error("Nepodařilo se načíst vozidla"); }
   }, []);
 
   const fetchAnalytics = useCallback(async () => {
@@ -29,7 +30,7 @@ export default function FuelAnalytics() {
       if (filters.date_to) params.append("date_to", filters.date_to);
       const res = await axios.get(`${API}/reports/fuel-analytics?${params}`, { withCredentials: true });
       setData(res.data);
-    } catch { /* */ }
+    } catch { toast.error("Nepodařilo se načíst analytiku"); }
     finally { setLoading(false); }
   }, [filters]);
 

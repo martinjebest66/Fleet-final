@@ -11,11 +11,11 @@ import os
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
 
-# Test credentials from main agent
-ADMIN_EMAIL = "admin@autoskola.cz"
-ADMIN_PASSWORD = "Admin123!"
-TEST_INSTRUCTOR_ID = "inst_aba594d9cd55"
-TEST_INSTRUCTOR_PIN = "1234"
+# Test credentials from environment
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@autoskola.cz")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin123!")
+TEST_INSTRUCTOR_ID = os.environ.get("TEST_INSTRUCTOR_ID", "inst_aba594d9cd55")
+TEST_INSTRUCTOR_PIN = os.environ.get("TEST_INSTRUCTOR_PIN", "1234")
 
 
 class TestAdminLogin:

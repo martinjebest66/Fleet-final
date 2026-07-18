@@ -857,6 +857,7 @@ async def delete_vehicle(vehicle_id: str, user: User = Depends(get_admin_user)):
 async def get_vehicle_by_qr(qr_code: str):
     """Get vehicle info by QR code (public endpoint for mobile)"""
     # Check if it's a fuel, damage, or handover QR code
+    qr_type = None
     if qr_code.startswith("fuel_"):
         vehicle_id = qr_code.replace("fuel_", "")
         qr_type = "fuel"
@@ -1589,6 +1590,62 @@ async def get_km_statistics(
     }
 
 
+def _aggregate_fuel_per_vehicle(fuel_entries: list, vehicle_map: dict) -> dict:
+    """Aggregate fuel entries per vehicle."""
+    vehicle_fuel_data = {}
+    for entry in fuel_entries:
+        vid = entry["vehicle_id"]
+        if vid not in vehicle_fuel_data:
+            v = vehicle_map.get(vid, {})
+            vehicle_fuel_data[vid] = {
+                "vehicle_id": vid,
+                "vehicle_info": f"{v.get('brand', '?')} {v.get('model', '?')} ({v.get('registration_plate', '?')})",
+                "entries": [],
+                "total_liters": 0,
+                "total_cost": 0,
+                "odometer_readings": [],
+            }
+        vd = vehicle_fuel_data[vid]
+        liters = entry.get("amount_liters", entry.get("amount", 0))
+        cost = entry.get("total_price", entry.get("price", 0))
+        odo = entry.get("odometer", 0)
+        vd["entries"].append({"date": entry.get("date", ""), "liters": liters, "cost": cost, "odometer": odo})
+        vd["total_liters"] += liters
+        vd["total_cost"] += cost
+        if odo > 0:
+            vd["odometer_readings"].append(odo)
+    return vehicle_fuel_data
+
+
+def _compute_vehicle_fuel_stats(vehicle_fuel_data: dict) -> tuple:
+    """Compute per-vehicle fuel stats and totals. Returns (vehicle_stats, totals)."""
+    vehicle_stats = []
+    total_liters = total_cost = total_km = 0
+    for vid, vd in vehicle_fuel_data.items():
+        readings = sorted(vd["odometer_readings"])
+        km_driven = (readings[-1] - readings[0]) if len(readings) >= 2 else 0
+        consumption = round((vd["total_liters"] / km_driven) * 100, 2) if km_driven > 0 else 0
+        cost_per_km = round(vd["total_cost"] / km_driven, 2) if km_driven > 0 else 0
+        total_liters += vd["total_liters"]
+        total_cost += vd["total_cost"]
+        total_km += km_driven
+        monthly = {}
+        for e in vd["entries"]:
+            month = e["date"][:7] if e["date"] else "?"
+            if month not in monthly:
+                monthly[month] = {"liters": 0, "cost": 0}
+            monthly[month]["liters"] += e["liters"]
+            monthly[month]["cost"] += e["cost"]
+        vehicle_stats.append({
+            "vehicle_id": vid, "vehicle_info": vd["vehicle_info"],
+            "total_liters": round(vd["total_liters"], 2), "total_cost": round(vd["total_cost"], 2),
+            "km_driven": km_driven, "consumption_per_100km": consumption,
+            "cost_per_km": cost_per_km, "fill_count": len(vd["entries"]),
+            "monthly_trend": [{"month": k, **v} for k, v in sorted(monthly.items())],
+        })
+    return vehicle_stats, {"total_liters": round(total_liters, 2), "total_cost": round(total_cost, 2), "total_km": total_km}
+
+
 @api_router.get("/reports/fuel-analytics")
 async def fuel_consumption_analytics(
     vehicle_id: Optional[str] = None,
@@ -1611,83 +1668,12 @@ async def fuel_consumption_analytics(
     vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(100)
     vehicle_map = {v["vehicle_id"]: v for v in vehicles}
 
-    # Per-vehicle stats
-    vehicle_fuel_data = {}
-    for entry in fuel_entries:
-        vid = entry["vehicle_id"]
-        if vid not in vehicle_fuel_data:
-            v = vehicle_map.get(vid, {})
-            vehicle_fuel_data[vid] = {
-                "vehicle_id": vid,
-                "vehicle_info": f"{v.get('brand', '?')} {v.get('model', '?')} ({v.get('registration_plate', '?')})",
-                "entries": [],
-                "total_liters": 0,
-                "total_cost": 0,
-                "odometer_readings": [],
-            }
-        vd = vehicle_fuel_data[vid]
-        liters = entry.get("amount_liters", entry.get("amount", 0))
-        cost = entry.get("total_price", entry.get("price", 0))
-        odo = entry.get("odometer", 0)
-
-        vd["entries"].append({
-            "date": entry.get("date", ""),
-            "liters": liters,
-            "cost": cost,
-            "odometer": odo,
-        })
-        vd["total_liters"] += liters
-        vd["total_cost"] += cost
-        if odo > 0:
-            vd["odometer_readings"].append(odo)
-
-    # Compute consumption
-    vehicle_stats = []
-    total_liters_all = 0
-    total_cost_all = 0
-    total_km_all = 0
-
-    for vid, vd in vehicle_fuel_data.items():
-        readings = sorted(vd["odometer_readings"])
-        km_driven = (readings[-1] - readings[0]) if len(readings) >= 2 else 0
-        consumption = round((vd["total_liters"] / km_driven) * 100, 2) if km_driven > 0 else 0
-        cost_per_km = round(vd["total_cost"] / km_driven, 2) if km_driven > 0 else 0
-
-        total_liters_all += vd["total_liters"]
-        total_cost_all += vd["total_cost"]
-        total_km_all += km_driven
-
-        # Monthly trend
-        monthly = {}
-        for e in vd["entries"]:
-            month = e["date"][:7] if e["date"] else "?"
-            if month not in monthly:
-                monthly[month] = {"liters": 0, "cost": 0}
-            monthly[month]["liters"] += e["liters"]
-            monthly[month]["cost"] += e["cost"]
-
-        vehicle_stats.append({
-            "vehicle_id": vid,
-            "vehicle_info": vd["vehicle_info"],
-            "total_liters": round(vd["total_liters"], 2),
-            "total_cost": round(vd["total_cost"], 2),
-            "km_driven": km_driven,
-            "consumption_per_100km": consumption,
-            "cost_per_km": cost_per_km,
-            "fill_count": len(vd["entries"]),
-            "monthly_trend": [{"month": k, **v} for k, v in sorted(monthly.items())],
-        })
-
-    avg_consumption = round((total_liters_all / total_km_all) * 100, 2) if total_km_all > 0 else 0
+    vehicle_fuel_data = _aggregate_fuel_per_vehicle(fuel_entries, vehicle_map)
+    vehicle_stats, totals = _compute_vehicle_fuel_stats(vehicle_fuel_data)
+    avg_consumption = round((totals["total_liters"] / totals["total_km"]) * 100, 2) if totals["total_km"] > 0 else 0
 
     return {
-        "summary": {
-            "total_liters": round(total_liters_all, 2),
-            "total_cost": round(total_cost_all, 2),
-            "total_km": total_km_all,
-            "avg_consumption_per_100km": avg_consumption,
-            "vehicle_count": len(vehicle_stats),
-        },
+        "summary": {**totals, "avg_consumption_per_100km": avg_consumption, "vehicle_count": len(vehicle_stats)},
         "vehicle_stats": vehicle_stats,
     }
 
@@ -2111,6 +2097,39 @@ async def get_vehicle_obd_history(
 
 # ======================== AUTO-TRIP DETECTION ========================
 
+def _build_trip_doc(vehicle_id: str, trip_start: dict, trip_points: list) -> dict:
+    """Build a trip document from detected trip start and points."""
+    trip_end = trip_points[-1]
+    end_ts = trip_end.get("timestamp")
+    if isinstance(end_ts, str):
+        end_ts = datetime.fromisoformat(end_ts)
+
+    distance = sum(
+        _haversine(trip_points[i]["lat"], trip_points[i]["lng"],
+                   trip_points[i + 1]["lat"], trip_points[i + 1]["lng"])
+        for i in range(len(trip_points) - 1)
+    )
+    speeds = [p.get("speed", 0) for p in trip_points if p.get("speed", 0) > 0]
+    now = datetime.now(timezone.utc)
+    start_time = trip_start["time"]
+
+    return {
+        "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
+        "vehicle_id": vehicle_id,
+        "start_time": start_time.isoformat() if isinstance(start_time, datetime) else start_time,
+        "end_time": end_ts.isoformat() if isinstance(end_ts, datetime) else end_ts,
+        "start_location": {"lat": trip_start["lat"], "lng": trip_start["lng"], "address": "GPS"},
+        "end_location": {"lat": trip_end["lat"], "lng": trip_end["lng"], "address": "GPS"},
+        "route_points": [{"lat": p["lat"], "lng": p["lng"], "timestamp": p.get("timestamp", "")} for p in trip_points],
+        "distance": int(distance),
+        "max_speed": max(speeds) if speeds else 0,
+        "avg_speed": int(sum(speeds) / len(speeds)) if speeds else 0,
+        "synced_to_logbook": False,
+        "auto_detected": True,
+        "created_at": now.isoformat(),
+    }, distance
+
+
 @api_router.post("/gps/detect-trips/{vehicle_id}")
 async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_current_user)):
     """Detect trips from position history using ignition on/off transitions."""
@@ -2118,10 +2137,8 @@ async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
 
-    # Get positions sorted by time
     positions = await db.vehicle_positions.find(
-        {"vehicle_id": vehicle_id},
-        {"_id": 0}
+        {"vehicle_id": vehicle_id}, {"_id": 0}
     ).sort("timestamp", 1).to_list(50000)
 
     if len(positions) < 2:
@@ -2143,44 +2160,10 @@ async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_
         elif ignition and trip_start is not None:
             trip_points.append(pos)
         elif not ignition and trip_start is not None and len(trip_points) >= 2:
-            # Trip ended
-            trip_end = trip_points[-1]
-            end_ts = trip_end.get("timestamp")
-            if isinstance(end_ts, str):
-                end_ts = datetime.fromisoformat(end_ts)
-
-            distance = sum(
-                _haversine(trip_points[i]["lat"], trip_points[i]["lng"],
-                           trip_points[i + 1]["lat"], trip_points[i + 1]["lng"])
-                for i in range(len(trip_points) - 1)
-            )
-            if distance < 100:  # skip trips < 100m
-                trip_start = None
-                trip_points = []
-                continue
-
-            speeds = [p.get("speed", 0) for p in trip_points if p.get("speed", 0) > 0]
-            trip_id = f"gps_{uuid.uuid4().hex[:12]}"
-            now = datetime.now(timezone.utc)
-
-            trip_doc = {
-                "trip_id": trip_id,
-                "vehicle_id": vehicle_id,
-                "start_time": trip_start["time"].isoformat() if isinstance(trip_start["time"], datetime) else trip_start["time"],
-                "end_time": end_ts.isoformat() if isinstance(end_ts, datetime) else end_ts,
-                "start_location": {"lat": trip_start["lat"], "lng": trip_start["lng"], "address": "GPS"},
-                "end_location": {"lat": trip_end["lat"], "lng": trip_end["lng"], "address": "GPS"},
-                "route_points": [{"lat": p["lat"], "lng": p["lng"], "timestamp": p.get("timestamp", "")} for p in trip_points],
-                "distance": int(distance),
-                "max_speed": max(speeds) if speeds else 0,
-                "avg_speed": int(sum(speeds) / len(speeds)) if speeds else 0,
-                "synced_to_logbook": False,
-                "auto_detected": True,
-                "created_at": now.isoformat(),
-            }
-            await db.gps_trips.insert_one(trip_doc)
-            trips_created += 1
-
+            trip_doc, distance = _build_trip_doc(vehicle_id, trip_start, trip_points)
+            if distance >= 100:
+                await db.gps_trips.insert_one(trip_doc)
+                trips_created += 1
             trip_start = None
             trip_points = []
 
@@ -2439,6 +2422,7 @@ async def import_ruhavik_data(
     content = (await file.read()).decode("utf-8", errors="ignore")
     filename = (file.filename or "").lower()
 
+    points = []
     if filename.endswith(".gpx"):
         points = _parse_gpx_file(content)
     elif filename.endswith(".csv"):

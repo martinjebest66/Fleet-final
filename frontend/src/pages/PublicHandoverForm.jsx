@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import axios from "axios";
 import { Handshake, Check, Car, ArrowRight, ArrowLeft, CheckCircle } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
+import { toast } from "sonner";
 import { HandoverInfoStep } from "./handover/HandoverInfoStep";
 import { HandoverFluidStep, FLUID_CHECKS } from "./handover/HandoverFluidStep";
 import { HandoverPhotoStep, PHOTO_STEPS } from "./handover/HandoverPhotoStep";
@@ -67,7 +68,7 @@ export default function PublicHandoverForm() {
         [photoStepId]: { photo_type: photoStepId, photo_url: res.data.url, timestamp: new Date().toISOString() }
       }));
     } catch (err) {
-      console.error("Upload failed:", err);
+      toast.error("Nahrávání fotky selhalo");
     } finally {
       setUploadingPhoto(false);
     }

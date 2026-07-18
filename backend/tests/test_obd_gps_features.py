@@ -13,10 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
 
 # Test credentials
-ADMIN_EMAIL = "admin@autoskola.cz"
-ADMIN_PASSWORD = "Admin123!"
-INSTRUCTOR_ID = "inst_aba594d9cd55"
-INSTRUCTOR_PIN = "1234"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@autoskola.cz")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin123!")
+INSTRUCTOR_ID = os.environ.get("TEST_INSTRUCTOR_ID", "inst_aba594d9cd55")
+INSTRUCTOR_PIN = os.environ.get("TEST_INSTRUCTOR_PIN", "1234")
 
 
 class TestTeltonikaParser:

@@ -11,7 +11,7 @@ export default function TrackerSetup() {
     try {
       const res = await axios.get(`${API}/gps/tcp-status`, { withCredentials: true });
       setTcpStatus(res.data);
-    } catch { /* */ }
+    } catch { toast.error("Nepodařilo se načíst stav serveru"); }
   }, []);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);

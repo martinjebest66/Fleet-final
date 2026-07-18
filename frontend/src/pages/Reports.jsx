@@ -6,9 +6,9 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { toast } from "sonner";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 import { format, subDays, subMonths, startOfMonth, endOfMonth } from "date-fns";
-import { toast } from "sonner";
 
 const chartTickSmall = { fontSize: 10 };
 const chartTickNormal = { fontSize: 12 };
@@ -28,7 +28,7 @@ export default function Reports() {
     try {
       const res = await axios.get(`${API}/vehicles`, { withCredentials: true });
       setVehicles(res.data);
-    } catch (error) { console.error(error); } 
+    } catch { toast.error("Nepodařilo se načíst vozidla"); } 
     finally { setLoading(false); }
   }, []);
 

@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import axios from "axios";
 import { Warning, Check, Car, Camera, X } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
+import { toast } from "sonner";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
@@ -53,7 +54,7 @@ export default function PublicDamageForm() {
         });
         setFormData(prev => ({ ...prev, photos: [...prev.photos, res.data.url] }));
       } catch (err) {
-        console.error("Upload failed:", err);
+        toast.error("Nahrávání fotky selhalo");
       }
     }
   };

@@ -28,7 +28,7 @@ export default function Login() {
     try {
       const res = await axios.get(`${API}/auth/instructors-list`);
       setInstructors(res.data);
-    } catch { /* ignore */ }
+    } catch { toast.error("Nepodařilo se načíst instruktory"); }
   }, []);
 
   useEffect(() => {

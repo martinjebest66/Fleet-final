@@ -50,7 +50,7 @@ export default function OBDDiagnostics() {
     try {
       const res = await axios.get(`${API}/obd/vehicles`, { withCredentials: true });
       setObdData(res.data);
-    } catch { /* */ }
+    } catch { toast.error("Nepodařilo se načíst OBD data"); }
     finally { setLoading(false); }
   }, []);
 
