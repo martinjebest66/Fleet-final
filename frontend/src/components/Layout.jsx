@@ -1,31 +1,74 @@
-import { Car, Users, BookOpen, GasPump, Warning, MapPin, ChartBar, Handshake, SignOut, List, Drop, Cpu, Engine, Wrench, CalendarCheck, FileArrowUp } from "@phosphor-icons/react";
+import { Car, Users, BookOpen, GasPump, Warning, MapPin, ChartBar, Handshake, SignOut, List, Drop, Cpu, Engine, Wrench, CalendarCheck, FileArrowUp, Path, Gear } from "@phosphor-icons/react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../App";
 import { useState, useMemo } from "react";
 
 const ADMIN_NAV = [
-  { name: "Přehled", href: "/dashboard", icon: ChartBar },
-  { name: "Vozidla", href: "/vehicles", icon: Car },
-  { name: "Instruktoři", href: "/instructors", icon: Users },
-  { name: "Kniha jízd", href: "/logbook", icon: BookOpen },
-  { name: "Tankování", href: "/fuel", icon: GasPump },
-  { name: "Spotřeba", href: "/fuel-analytics", icon: Drop },
-  { name: "Poškození", href: "/damages", icon: Warning },
-  { name: "Předávky", href: "/handovers", icon: Handshake },
-  { name: "Údržba", href: "/maintenance", icon: CalendarCheck },
-  { name: "GPS sledování", href: "/gps", icon: MapPin },
-  { name: "Import Ruhavik", href: "/ruhavik-import", icon: FileArrowUp },
-  { name: "OBD Diagnostika", href: "/obd", icon: Engine },
-  { name: "Nastavení trackeru", href: "/tracker-setup", icon: Wrench },
-  { name: "Reporty", href: "/reports", icon: ChartBar },
+  {
+    section: "Přehled",
+    items: [
+      { name: "Dashboard", href: "/dashboard", icon: ChartBar },
+      { name: "Report km", href: "/reservations", icon: Path },
+      { name: "Reporty", href: "/reports", icon: BookOpen },
+      { name: "Spotřeba", href: "/fuel-analytics", icon: Drop },
+    ],
+  },
+  {
+    section: "Provoz",
+    items: [
+      { name: "Kniha jízd", href: "/logbook", icon: BookOpen },
+      { name: "Tankování", href: "/fuel", icon: GasPump },
+      { name: "Poškození", href: "/damages", icon: Warning },
+      { name: "Předávky", href: "/handovers", icon: Handshake },
+      { name: "Údržba", href: "/maintenance", icon: CalendarCheck },
+    ],
+  },
+  {
+    section: "Vozový park",
+    items: [
+      { name: "Vozidla", href: "/vehicles", icon: Car },
+      { name: "Instruktoři", href: "/instructors", icon: Users },
+    ],
+  },
+  {
+    section: "GPS & zařízení",
+    items: [
+      { name: "GPS sledování", href: "/gps", icon: MapPin },
+      { name: "OBD diagnostika", href: "/obd", icon: Engine },
+      { name: "Import Ruhavik", href: "/ruhavik-import", icon: FileArrowUp },
+      { name: "Nastavení trackeru", href: "/tracker-setup", icon: Wrench },
+    ],
+  },
+  {
+    section: "Systém",
+    items: [
+      { name: "Nastavení", href: "/settings", icon: Gear },
+    ],
+  },
 ];
 
 const INSTRUCTOR_NAV = [
-  { name: "Přehled", href: "/dashboard", icon: ChartBar },
-  { name: "Kniha jízd", href: "/logbook", icon: BookOpen },
-  { name: "Tankování", href: "/fuel", icon: GasPump },
-  { name: "Poškození", href: "/damages", icon: Warning },
-  { name: "GPS sledování", href: "/gps", icon: MapPin },
+  {
+    section: "Přehled",
+    items: [
+      { name: "Dashboard", href: "/dashboard", icon: ChartBar },
+      { name: "Report km", href: "/reservations", icon: Path },
+    ],
+  },
+  {
+    section: "Provoz",
+    items: [
+      { name: "Kniha jízd", href: "/logbook", icon: BookOpen },
+      { name: "Tankování", href: "/fuel", icon: GasPump },
+      { name: "Poškození", href: "/damages", icon: Warning },
+    ],
+  },
+  {
+    section: "GPS",
+    items: [
+      { name: "GPS sledování", href: "/gps", icon: MapPin },
+    ],
+  },
 ];
 
 export default function Layout() {
@@ -44,6 +87,19 @@ export default function Layout() {
     navigate("/login");
   };
 
+  const renderLink = (item, onClick) => (
+    <NavLink
+      key={item.name}
+      to={item.href}
+      onClick={onClick}
+      className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}
+      data-testid={`nav-${item.href.slice(1)}`}
+    >
+      <item.icon size={20} weight="duotone" />
+      <span>{item.name}</span>
+    </NavLink>
+  );
+
   return (
     <div className="flex min-h-screen bg-[#F4F4F5]">
       {/* Desktop Sidebar */}
@@ -58,17 +114,14 @@ export default function Layout() {
           </div>
         </div>
 
-        <nav className="flex-1 py-4">
-          {navigation.map((item) => (
-            <NavLink
-              key={item.name}
-              to={item.href}
-              className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}
-              data-testid={`nav-${item.href.slice(1)}`}
-            >
-              <item.icon size={20} weight="duotone" />
-              <span>{item.name}</span>
-            </NavLink>
+        <nav className="flex-1 py-3 overflow-y-auto">
+          {navigation.map((group) => (
+            <div key={group.section} className="mb-2">
+              <p className="px-6 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#A1A1AA]">
+                {group.section}
+              </p>
+              {group.items.map((item) => renderLink(item))}
+            </div>
           ))}
         </nav>
 
@@ -106,20 +159,25 @@ export default function Layout() {
         </div>
 
         {mobileMenuOpen && (
-          <div className="absolute top-full left-0 right-0 bg-white border-b border-[#E4E4E7] shadow-lg animate-fade-in">
+          <div className="absolute top-full left-0 right-0 bg-white border-b border-[#E4E4E7] shadow-lg animate-fade-in max-h-[80vh] overflow-y-auto">
             <nav className="py-2">
-              {navigation.map((item) => (
-                <NavLink
-                  key={item.name}
-                  to={item.href}
-                  onClick={() => setMobileMenuOpen(false)}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 px-4 py-3 text-sm ${isActive ? "bg-[#002FA7] text-white" : "text-[#52525B] hover:bg-[#F4F4F5]"}`
-                  }
-                >
-                  <item.icon size={20} weight="duotone" />
-                  <span>{item.name}</span>
-                </NavLink>
+              {navigation.map((group) => (
+                <div key={group.section}>
+                  <p className="px-4 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#A1A1AA]">{group.section}</p>
+                  {group.items.map((item) => (
+                    <NavLink
+                      key={item.name}
+                      to={item.href}
+                      onClick={() => setMobileMenuOpen(false)}
+                      className={({ isActive }) =>
+                        `flex items-center gap-3 px-4 py-3 text-sm ${isActive ? "bg-[#002FA7] text-white" : "text-[#52525B] hover:bg-[#F4F4F5]"}`
+                      }
+                    >
+                      <item.icon size={20} weight="duotone" />
+                      <span>{item.name}</span>
+                    </NavLink>
+                  ))}
+                </div>
               ))}
               <button onClick={handleLogout} className="flex items-center gap-3 px-4 py-3 text-sm text-[#991B1B] hover:bg-red-50 w-full">
                 <SignOut size={20} weight="duotone" />

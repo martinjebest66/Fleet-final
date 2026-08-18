@@ -79,6 +79,7 @@ class VehicleCreate(BaseModel):
     odometer: int = 0
     fuel_type: str = "benzín"  # benzín, nafta, LPG, elektro
     assigned_instructor_id: Optional[str] = None
+    reservation_alias: Optional[str] = None  # název vozidla v rezervačním systému
 
 class Vehicle(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -91,6 +92,7 @@ class Vehicle(BaseModel):
     odometer: int = 0
     fuel_type: str
     assigned_instructor_id: Optional[str] = None
+    reservation_alias: Optional[str] = None
     qr_code_fuel: str
     qr_code_damage: str
     qr_code_handover: Optional[str] = None
@@ -2471,6 +2473,477 @@ async def public_upload_file(file: UploadFile = File(...)):
     content_type = file.content_type or 'image/jpeg'
     data_url = f"data:{content_type};base64,{base64_content}"
     return {"url": data_url, "filename": file.filename}
+
+# ======================== RESERVATION REPORTS (Report ujetých km) ========================
+import re as _re
+from collections import defaultdict as _defaultdict
+
+DEFAULT_RESERVATION_SETTINGS = {
+    "base_limit_km": 60.0,
+    "minutes_per_hour_unit": 45,   # 1 "hodina" ve výcviku = 45 min
+    "gps_tz_offset_hours": 2,      # posun místního času vůči UTC v GPS datech
+    "private_by_instructor": True,  # smí instruktor označit jízdu jako soukromou
+    "locations": ["Karlovy Vary, Dolní nádraží", "Ostrov, Učebna"],
+    "distances": [
+        {"from": "Karlovy Vary, Dolní nádraží", "to": "Ostrov, Učebna", "km": 12.0},
+    ],
+}
+
+
+def _norm_loc(name):
+    if not name:
+        return ""
+    s = str(name).replace("[mapa]", "").strip()
+    s = _re.sub(r"\s+", " ", s)
+    return s.rstrip(" ,")
+
+
+def _loc_key(name):
+    return _norm_loc(name).lower()
+
+
+async def get_reservation_settings() -> dict:
+    doc = await db.app_settings.find_one({"key": "reservations"}, {"_id": 0})
+    settings = dict(DEFAULT_RESERVATION_SETTINGS)
+    if doc:
+        for k in DEFAULT_RESERVATION_SETTINGS:
+            if k in doc and doc[k] is not None:
+                settings[k] = doc[k]
+    return settings
+
+
+def _distance_between(settings, loc_a, loc_b):
+    ka, kb = _loc_key(loc_a), _loc_key(loc_b)
+    if not ka or not kb or ka == kb:
+        return 0.0
+    for d in settings.get("distances", []):
+        df, dt = _loc_key(d.get("from")), _loc_key(d.get("to"))
+        if {df, dt} == {ka, kb}:
+            try:
+                return float(d.get("km") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _parse_datum(raw):
+    """'St 1.7.2026 (08:00)' -> (date_iso, naive datetime)."""
+    if not raw:
+        return None, None
+    s = str(raw)
+    m = _re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4}).*?\((\d{1,2}):(\d{2})\)", s)
+    if m:
+        d, mo, y, hh, mm = (int(m.group(i)) for i in range(1, 6))
+        try:
+            dt = datetime(y, mo, d, hh, mm)
+            return dt.date().isoformat(), dt
+        except ValueError:
+            return None, None
+    m2 = _re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", s)
+    if m2:
+        d, mo, y = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        try:
+            dt = datetime(y, mo, d, 0, 0)
+            return dt.date().isoformat(), dt
+        except ValueError:
+            return None, None
+    return None, None
+
+
+def _parse_num(raw):
+    if raw is None:
+        return None
+    s = str(raw).strip().replace("\xa0", "").replace(" ", "").replace(",", ".")
+    if s in ("", "???", "-", "nan", "NaN", "None"):
+        return None
+    m = _re.search(r"-?\d+(\.\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def parse_reservation_file(content: bytes):
+    """Parse the reservation export (HTML table saved as .xls) into row dicts."""
+    from bs4 import BeautifulSoup
+    text = content.decode("utf-8", errors="replace")
+    soup = BeautifulSoup(text, "html.parser")
+    table = soup.find("table")
+    if not table:
+        return []
+    rows = table.find_all("tr")
+    if not rows:
+        return []
+    header_cells = rows[0].find_all(["th", "td"])
+    headers = [c.get_text(strip=True).lower() for c in header_cells]
+
+    def find_idx(*keys):
+        for i, h in enumerate(headers):
+            for k in keys:
+                if k in h:
+                    return i
+        return None
+
+    idx_datum = find_idx("datum")
+    idx_hodin = find_idx("hodin")
+    idx_ucitel = find_idx("učitel", "ucitel")
+    idx_stan = find_idx("stanoviš", "stanovis")
+    idx_voz = find_idx("vozidlo")
+    idx_skup = find_idx("skupina")
+    idx_zak = find_idx("zákazník", "zakaznik")
+    idx_pozn = find_idx("poznám", "poznam")
+    idx_tacho_start = idx_tacho_end = None
+    for i, h in enumerate(headers):
+        if "tacho" in h and ("zač" in h or "zac" in h):
+            idx_tacho_start = i
+        if "tacho" in h and "kon" in h:
+            idx_tacho_end = i
+    km_idxs = [i for i, h in enumerate(headers) if h == "km" or h.startswith("km")]
+    idx_km_res = km_idxs[0] if km_idxs else None
+    idx_km_calc = km_idxs[1] if len(km_idxs) > 1 else None
+
+    out = []
+    for r in rows[1:]:
+        cells = r.find_all(["td", "th"])
+        if not cells:
+            continue
+        vals = [c.get_text(" ", strip=True) for c in cells]
+
+        def gv(i):
+            if i is None or i >= len(vals):
+                return None
+            v = vals[i]
+            return v if v not in ("", "nan") else None
+
+        out.append({
+            "datum": gv(idx_datum),
+            "hodin": gv(idx_hodin),
+            "teacher": gv(idx_ucitel),
+            "boarding": gv(idx_stan),
+            "vehicle_name": gv(idx_voz),
+            "activity": gv(idx_skup),
+            "customer": gv(idx_zak),
+            "reservation_km": gv(idx_km_res),
+            "tacho_start": gv(idx_tacho_start),
+            "tacho_end": gv(idx_tacho_end),
+            "km_calc": gv(idx_km_calc),
+            "note": gv(idx_pozn),
+        })
+    return out
+
+
+async def _match_or_create_vehicle(vehicle_name, cache):
+    if not vehicle_name:
+        return None
+    name = str(vehicle_name).strip()
+    key = name.lower()
+    if key in cache:
+        return cache[key]
+    v = await db.vehicles.find_one(
+        {"reservation_alias": {"$regex": f"^{_re.escape(name)}$", "$options": "i"}}, {"_id": 0}
+    )
+    if not v:
+        all_v = await db.vehicles.find({}, {"_id": 0}).to_list(500)
+        for cand in all_v:
+            combo = f"{cand.get('brand', '')} {cand.get('model', '')}".strip().lower()
+            plate = str(cand.get("registration_plate", "")).strip().lower()
+            if (combo and (combo == key or combo in key or key in combo)) or plate == key:
+                v = cand
+                break
+    if v:
+        vid = v["vehicle_id"]
+        if not v.get("reservation_alias"):
+            await db.vehicles.update_one({"vehicle_id": vid}, {"$set": {"reservation_alias": name}})
+        cache[key] = vid
+        return vid
+    # auto-create a placeholder vehicle
+    vehicle_id = f"veh_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    parts = name.split()
+    brand = parts[0] if parts else name
+    model = " ".join(parts[1:]) if len(parts) > 1 else ""
+    await db.vehicles.insert_one({
+        "vehicle_id": vehicle_id,
+        "registration_plate": name[:20],
+        "brand": brand,
+        "model": model,
+        "year": 0,
+        "vin": None,
+        "odometer": 0,
+        "fuel_type": "benzín",
+        "assigned_instructor_id": None,
+        "reservation_alias": name,
+        "qr_code_fuel": f"fuel_{vehicle_id}",
+        "qr_code_damage": f"damage_{vehicle_id}",
+        "qr_code_handover": f"handover_{vehicle_id}",
+        "auto_created": True,
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    })
+    cache[key] = vehicle_id
+    return vehicle_id
+
+
+async def _load_positions(vehicle_id):
+    if not vehicle_id:
+        return []
+    positions = await db.vehicle_positions.find(
+        {"vehicle_id": vehicle_id}, {"_id": 0, "lat": 1, "lng": 1, "timestamp": 1}
+    ).to_list(200000)
+    parsed = []
+    for p in positions:
+        ts, la, ln = p.get("timestamp"), p.get("lat"), p.get("lng")
+        if ts is None or la is None or ln is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")) if isinstance(ts, str) else ts
+            if getattr(dt, "tzinfo", None) is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            continue
+        parsed.append((dt, la, ln))
+    parsed.sort(key=lambda x: x[0])
+    return parsed
+
+
+def _km_in_window(positions, start_dt, end_dt, tz_off):
+    if not positions or not start_dt or not end_dt:
+        return {"gps_km": None, "points": [], "available": False}
+    start_utc = start_dt - timedelta(hours=tz_off)
+    end_utc = end_dt - timedelta(hours=tz_off)
+    pts = [(dt, la, ln) for (dt, la, ln) in positions if start_utc <= dt <= end_utc]
+    points = [{"lat": la, "lng": ln} for _, la, ln in pts]
+    if len(pts) < 2:
+        return {"gps_km": None, "points": points, "available": False}
+    meters = 0.0
+    for i in range(1, len(pts)):
+        meters += _haversine(pts[i - 1][1], pts[i - 1][2], pts[i][1], pts[i][2])
+    return {"gps_km": round(meters / 1000.0, 1), "points": points, "available": True}
+
+
+def _instructor_match(teacher, instr_name):
+    if not teacher or not instr_name:
+        return False
+    t = teacher.lower()
+    tokens = [tok for tok in _re.split(r"[^0-9a-zá-žě-ú]+", instr_name.lower()) if len(tok) >= 3]
+    return any(tok in t for tok in tokens)
+
+
+@api_router.post("/reservations/import")
+async def import_reservations(file: UploadFile = File(...), user: User = Depends(get_admin_user)):
+    """Import a reservation-system export and store parsed drives."""
+    content = await file.read()
+    try:
+        rows = parse_reservation_file(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Nepodařilo se načíst soubor: {e}")
+    if not rows:
+        raise HTTPException(status_code=400, detail="V souboru nebyla nalezena žádná data")
+
+    settings = await get_reservation_settings()
+    mpu = settings.get("minutes_per_hour_unit", 45)
+    batch_id = f"batch_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    cache = {}
+    drives = []
+    skipped = 0
+
+    for row in rows:
+        date_iso, start_dt = _parse_datum(row.get("datum"))
+        if not start_dt:
+            skipped += 1
+            continue
+        hours = _parse_num(row.get("hodin"))
+        duration_min = int(round(hours * mpu)) if (hours is not None and 0 < hours <= 12) else None
+        vehicle_id = await _match_or_create_vehicle(row.get("vehicle_name"), cache)
+        drives.append({
+            "drive_id": f"drv_{uuid.uuid4().hex[:12]}",
+            "batch_id": batch_id,
+            "date": date_iso,
+            "start_datetime": start_dt.isoformat(),
+            "hours": hours,
+            "duration_min": duration_min,
+            "teacher": row.get("teacher"),
+            "vehicle_name": row.get("vehicle_name"),
+            "vehicle_id": vehicle_id,
+            "boarding_location": _norm_loc(row.get("boarding")),
+            "activity": row.get("activity"),
+            "customer": row.get("customer"),
+            "reservation_km": _parse_num(row.get("reservation_km")) if _parse_num(row.get("reservation_km")) is not None else _parse_num(row.get("km_calc")),
+            "tacho_start": _parse_num(row.get("tacho_start")),
+            "tacho_end": _parse_num(row.get("tacho_end")),
+            "note": row.get("note"),
+            "is_private": False,
+            "created_at": now.isoformat(),
+        })
+
+    if drives:
+        await db.reservation_drives.insert_many(drives)
+    await db.reservation_batches.insert_one({
+        "batch_id": batch_id,
+        "filename": file.filename,
+        "count": len(drives),
+        "skipped": skipped,
+        "created_at": now.isoformat(),
+        "created_by": user.email,
+    })
+    names = sorted({d["vehicle_name"] for d in drives if d.get("vehicle_name")})
+    return {"batch_id": batch_id, "imported": len(drives), "skipped": skipped, "vehicles": names}
+
+
+@api_router.get("/reservations/drives")
+async def get_reservation_drives(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    vehicle_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    only_exceeded: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Report of drives with GPS km, tolerance and limit evaluation."""
+    query = {}
+    if date_from or date_to:
+        query["date"] = {}
+        if date_from:
+            query["date"]["$gte"] = date_from
+        if date_to:
+            query["date"]["$lte"] = date_to
+    if vehicle_id:
+        query["vehicle_id"] = vehicle_id
+    if batch_id:
+        query["batch_id"] = batch_id
+
+    drives = await db.reservation_drives.find(query, {"_id": 0}).to_list(10000)
+
+    if user.role == "instructor":
+        instr = await db.instructors.find_one({"instructor_id": user.user_id}, {"_id": 0})
+        assigned = set(instr.get("assigned_vehicle_ids", [])) if instr else set()
+        name = instr.get("name") if instr else user.name
+        drives = [d for d in drives if (d.get("vehicle_id") in assigned) or _instructor_match(d.get("teacher"), name)]
+
+    settings = await get_reservation_settings()
+    base_limit = float(settings.get("base_limit_km", 60))
+    tz_off = settings.get("gps_tz_offset_hours", 2)
+
+    # tolerance per drive (group by vehicle + date, ordered by time)
+    groups = _defaultdict(list)
+    for d in drives:
+        groups[(d.get("vehicle_id"), d.get("date"))].append(d)
+    tol_map = {}
+    for _key, items in groups.items():
+        items_sorted = sorted(items, key=lambda x: x.get("start_datetime") or "")
+        for i, d in enumerate(items_sorted):
+            prev_loc = items_sorted[i - 1].get("boarding_location") if i > 0 else None
+            next_loc = items_sorted[i + 1].get("boarding_location") if i < len(items_sorted) - 1 else None
+            approach = _distance_between(settings, prev_loc, d.get("boarding_location")) if prev_loc else 0.0
+            departure = _distance_between(settings, d.get("boarding_location"), next_loc) if next_loc else 0.0
+            tol_map[d["drive_id"]] = round(approach + departure, 1)
+
+    # preload GPS positions once per vehicle
+    pos_cache = {}
+    for vid in {d.get("vehicle_id") for d in drives if d.get("vehicle_id")}:
+        pos_cache[vid] = await _load_positions(vid)
+
+    result = []
+    for d in drives:
+        start_dt = datetime.fromisoformat(d["start_datetime"]) if d.get("start_datetime") else None
+        end_dt = start_dt + timedelta(minutes=d["duration_min"]) if (start_dt and d.get("duration_min")) else None
+        gps = _km_in_window(pos_cache.get(d.get("vehicle_id"), []), start_dt, end_dt, tz_off)
+        tolerance = tol_map.get(d["drive_id"], 0.0)
+        eff_limit = round(base_limit + tolerance, 1)
+        gps_km = gps["gps_km"]
+        exceeded = bool(gps["available"] and gps_km is not None and gps_km > eff_limit)
+        item = dict(d)
+        item["tolerance_km"] = tolerance
+        item["base_limit_km"] = base_limit
+        item["effective_limit_km"] = eff_limit
+        item["gps_km"] = gps_km
+        item["gps_available"] = gps["available"]
+        item["route_hidden"] = bool(d.get("is_private"))
+        item["exceeded"] = exceeded
+        result.append(item)
+
+    result.sort(key=lambda x: x.get("start_datetime") or "")
+    if only_exceeded:
+        result = [r for r in result if r["exceeded"]]
+
+    summary = {
+        "total": len(result),
+        "exceeded": sum(1 for r in result if r["exceeded"]),
+        "missing_gps": sum(1 for r in result if not r["gps_available"]),
+        "total_gps_km": round(sum(r["gps_km"] for r in result if r["gps_km"] is not None), 1),
+    }
+    return {"drives": result, "summary": summary}
+
+
+@api_router.get("/reservations/drives/{drive_id}/route")
+async def get_reservation_drive_route(drive_id: str, user: User = Depends(get_current_user)):
+    d = await db.reservation_drives.find_one({"drive_id": drive_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(status_code=404, detail="Jízda nenalezena")
+    if d.get("is_private"):
+        return {"private": True, "points": [], "gps_km": None}
+    settings = await get_reservation_settings()
+    tz_off = settings.get("gps_tz_offset_hours", 2)
+    start_dt = datetime.fromisoformat(d["start_datetime"]) if d.get("start_datetime") else None
+    end_dt = start_dt + timedelta(minutes=d["duration_min"]) if (start_dt and d.get("duration_min")) else None
+    positions = await _load_positions(d.get("vehicle_id"))
+    gps = _km_in_window(positions, start_dt, end_dt, tz_off)
+    return {"private": False, "points": gps["points"], "gps_km": gps["gps_km"]}
+
+
+@api_router.patch("/reservations/drives/{drive_id}/private")
+async def toggle_drive_private(drive_id: str, request: Request, user: User = Depends(get_current_user)):
+    body = await request.json()
+    is_private = bool(body.get("is_private"))
+    settings = await get_reservation_settings()
+    if user.role == "instructor" and not settings.get("private_by_instructor", True):
+        raise HTTPException(status_code=403, detail="Instruktor nemá oprávnění měnit soukromí jízdy")
+    res = await db.reservation_drives.update_one({"drive_id": drive_id}, {"$set": {"is_private": is_private}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Jízda nenalezena")
+    return {"drive_id": drive_id, "is_private": is_private}
+
+
+@api_router.get("/reservations/batches")
+async def list_reservation_batches(user: User = Depends(get_current_user)):
+    return await db.reservation_batches.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
+@api_router.delete("/reservations/batches/{batch_id}")
+async def delete_reservation_batch(batch_id: str, user: User = Depends(get_admin_user)):
+    await db.reservation_drives.delete_many({"batch_id": batch_id})
+    await db.reservation_batches.delete_one({"batch_id": batch_id})
+    return {"message": "Import smazán"}
+
+
+@api_router.get("/reservations/settings")
+async def get_reservation_settings_endpoint(user: User = Depends(get_current_user)):
+    return await get_reservation_settings()
+
+
+@api_router.put("/reservations/settings")
+async def update_reservation_settings_endpoint(request: Request, user: User = Depends(get_admin_user)):
+    body = await request.json()
+    allowed = set(DEFAULT_RESERVATION_SETTINGS.keys())
+    update = {k: v for k, v in body.items() if k in allowed}
+    update["key"] = "reservations"
+    await db.app_settings.update_one({"key": "reservations"}, {"$set": update}, upsert=True)
+    return await get_reservation_settings()
+
+
+@api_router.get("/reservations/vehicle-mapping")
+async def reservation_vehicle_mapping(user: User = Depends(get_admin_user)):
+    names = await db.reservation_drives.distinct("vehicle_name")
+    vehicles = await db.vehicles.find(
+        {}, {"_id": 0, "vehicle_id": 1, "registration_plate": 1, "brand": 1, "model": 1, "reservation_alias": 1, "auto_created": 1}
+    ).to_list(500)
+    return {"reservation_vehicle_names": [n for n in names if n], "vehicles": vehicles}
+
+
 
 # ======================== ROOT ========================
 

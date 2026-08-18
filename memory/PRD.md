@@ -36,6 +36,12 @@ Fleet management app for a driving school with vehicle/instructor management, dr
 - [x] Ruhavik CSV/GPX import for historical GPS data
 - [x] Email notifications for damage reports (via Resend - needs API key)
 - [x] HTTPS Let's Encrypt setup script
+- [x] Reservation km-report: import reservation-system export (HTML/.xls), compute real GPS km per drive from vehicle_positions, alert on configurable limit
+- [x] Boarding-location tolerance (per transfer, KV<->Ostrov=12km => middle drive KV->Ostrov->KV = +24), all distances configurable
+- [x] Private drive flag (hides GPS route, keeps driven km)
+- [x] Reservation Settings page (limits, minutes/hour, tz offset, locations, distance matrix, instructor-private permission)
+- [x] Grouped/sectioned sidebar menu (Přehled / Provoz / Vozový park / GPS & zařízení / Systém)
+- [x] JWT_SECRET added to backend/.env (fixes admin/instructor login 500)
 
 ## Credentials
 - Admin: admin@autoskola.cz / Admin123!
