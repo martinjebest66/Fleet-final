@@ -357,7 +357,10 @@ JWT_ALGORITHM = "HS256"
 
 
 def get_jwt_secret() -> str:
-    return os.environ["JWT_SECRET"]
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="JWT_SECRET není nakonfigurován")
+    return secret
 
 
 def hash_password(password: str) -> str:
@@ -551,6 +554,9 @@ async def _try_jwt_auth(request: Request) -> Optional[User]:
             parse_datetime_field(user_doc, "created_at")
             return User(**user_doc)
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
+    except Exception:
+        # Never let JWT parsing errors 500 the request; fall back to session auth
         return None
 
 
