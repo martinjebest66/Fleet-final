@@ -42,6 +42,7 @@ Fleet management app for a driving school with vehicle/instructor management, dr
 - [x] Reservation Settings page (limits, minutes/hour, tz offset, locations, distance matrix, instructor-private permission)
 - [x] Grouped/sectioned sidebar menu (Přehled / Provoz / Vozový park / GPS & zařízení / Systém)
 - [x] JWT_SECRET added to backend/.env (fixes admin/instructor login 500)
+- [x] ICS calendar sync per instructor (ics_url field): POST /api/reservations/sync-ics parses VEVENTs (DTSTART/DTEND UTC, LOCATION=vehicle, SUMMARY=customer/(group)/[boarding]), dedupe by UID, preserves private flag on re-sync
 
 ## Credentials
 - Admin: admin@autoskola.cz / Admin123!

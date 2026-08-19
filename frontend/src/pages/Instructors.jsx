@@ -17,7 +17,7 @@ export default function Instructors() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [selectedInstructor, setSelectedInstructor] = useState(null);
   const [formData, setFormData] = useState({
-    name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: [], pin: ""
+    name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: [], pin: "", ics_url: ""
   });
 
   const fetchData = useCallback(async () => {
@@ -59,13 +59,13 @@ export default function Instructors() {
 
   const openEditModal = (instructor) => {
     setSelectedInstructor(instructor);
-    setFormData({ name: instructor.name, email: instructor.email, phone: instructor.phone, license_number: instructor.license_number, assigned_vehicle_ids: instructor.assigned_vehicle_ids || [], pin: instructor.pin || "" });
+    setFormData({ name: instructor.name, email: instructor.email, phone: instructor.phone, license_number: instructor.license_number, assigned_vehicle_ids: instructor.assigned_vehicle_ids || [], pin: instructor.pin || "", ics_url: instructor.ics_url || "" });
     setShowModal(true);
   };
 
   const resetForm = () => {
     setSelectedInstructor(null);
-    setFormData({ name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: [], pin: "" });
+    setFormData({ name: "", email: "", phone: "", license_number: "", assigned_vehicle_ids: [], pin: "", ics_url: "" });
   };
 
   const getAssignedVehicles = (instructor) => {
@@ -139,6 +139,11 @@ export default function Instructors() {
               <Label>PIN pro přihlášení</Label>
               <Input type="text" inputMode="numeric" maxLength={6} value={formData.pin} onChange={(e) => setFormData({ ...formData, pin: e.target.value.replace(/\D/g, "") })} placeholder="4-6 místný PIN (volitelné)" className="font-mono tracking-widest" data-testid="instructor-pin-field" />
               <p className="text-xs text-[#A1A1AA] mt-1">Nastavte PIN pro přihlášení instruktora do systému</p>
+            </div>
+            <div>
+              <Label>ICS odkaz na kalendář</Label>
+              <Input type="url" value={formData.ics_url} onChange={(e) => setFormData({ ...formData, ics_url: e.target.value })} placeholder="https://.../kal_xxx.ics" data-testid="instructor-ics-field" />
+              <p className="text-xs text-[#A1A1AA] mt-1">Statický odkaz na kalendář učitele pro synchronizaci jízd</p>
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setShowModal(false)}>Zrušit</Button>

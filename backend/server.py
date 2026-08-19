@@ -107,6 +107,7 @@ class InstructorCreate(BaseModel):
     license_number: str
     assigned_vehicle_ids: List[str] = []
     pin: Optional[str] = None  # 4-6 digit PIN for instructor login
+    ics_url: Optional[str] = None  # statický odkaz na ICS kalendář učitele
 
 class Instructor(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -117,6 +118,7 @@ class Instructor(BaseModel):
     license_number: str
     assigned_vehicle_ids: List[str] = []
     pin: Optional[str] = None
+    ics_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -2708,11 +2710,10 @@ async def _load_positions(vehicle_id):
     return parsed
 
 
-def _km_in_window(positions, start_dt, end_dt, tz_off):
-    if not positions or not start_dt or not end_dt:
+def _km_in_window(positions, start_utc, end_utc):
+    """positions and start/end are all naive UTC."""
+    if not positions or not start_utc or not end_utc:
         return {"gps_km": None, "points": [], "available": False}
-    start_utc = start_dt - timedelta(hours=tz_off)
-    end_utc = end_dt - timedelta(hours=tz_off)
     pts = [(dt, la, ln) for (dt, la, ln) in positions if start_utc <= dt <= end_utc]
     points = [{"lat": la, "lng": ln} for _, la, ln in pts]
     if len(pts) < 2:
@@ -2721,6 +2722,28 @@ def _km_in_window(positions, start_dt, end_dt, tz_off):
     for i in range(1, len(pts)):
         meters += _haversine(pts[i - 1][1], pts[i - 1][2], pts[i][1], pts[i][2])
     return {"gps_km": round(meters / 1000.0, 1), "points": points, "available": True}
+
+
+def _drive_window_utc(drive, tz_off):
+    """Return (start_utc_naive, end_utc_naive). Uses start_utc if present (ICS),
+    else converts local start_datetime with tz offset (xls)."""
+    su = drive.get("start_utc")
+    if su:
+        start = datetime.fromisoformat(su)
+        if start.tzinfo is not None:
+            start = start.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        sd = drive.get("start_datetime")
+        if not sd:
+            return None, None
+        start_local = datetime.fromisoformat(sd)
+        if start_local.tzinfo is not None:
+            start_local = start_local.replace(tzinfo=None)
+        start = start_local - timedelta(hours=tz_off)
+    dur = drive.get("duration_min")
+    if not dur:
+        return start, None
+    return start, start + timedelta(minutes=dur)
 
 
 def _instructor_match(teacher, instr_name):
@@ -2849,9 +2872,8 @@ async def get_reservation_drives(
 
     result = []
     for d in drives:
-        start_dt = datetime.fromisoformat(d["start_datetime"]) if d.get("start_datetime") else None
-        end_dt = start_dt + timedelta(minutes=d["duration_min"]) if (start_dt and d.get("duration_min")) else None
-        gps = _km_in_window(pos_cache.get(d.get("vehicle_id"), []), start_dt, end_dt, tz_off)
+        start_utc, end_utc = _drive_window_utc(d, tz_off)
+        gps = _km_in_window(pos_cache.get(d.get("vehicle_id"), []), start_utc, end_utc)
         tolerance = tol_map.get(d["drive_id"], 0.0)
         eff_limit = round(base_limit + tolerance, 1)
         gps_km = gps["gps_km"]
@@ -2888,10 +2910,9 @@ async def get_reservation_drive_route(drive_id: str, user: User = Depends(get_cu
         return {"private": True, "points": [], "gps_km": None}
     settings = await get_reservation_settings()
     tz_off = settings.get("gps_tz_offset_hours", 2)
-    start_dt = datetime.fromisoformat(d["start_datetime"]) if d.get("start_datetime") else None
-    end_dt = start_dt + timedelta(minutes=d["duration_min"]) if (start_dt and d.get("duration_min")) else None
+    start_utc, end_utc = _drive_window_utc(d, tz_off)
     positions = await _load_positions(d.get("vehicle_id"))
-    gps = _km_in_window(positions, start_dt, end_dt, tz_off)
+    gps = _km_in_window(positions, start_utc, end_utc)
     return {"private": False, "points": gps["points"], "gps_km": gps["gps_km"]}
 
 
@@ -2942,6 +2963,200 @@ async def reservation_vehicle_mapping(user: User = Depends(get_admin_user)):
         {}, {"_id": 0, "vehicle_id": 1, "registration_plate": 1, "brand": 1, "model": 1, "reservation_alias": 1, "auto_created": 1}
     ).to_list(500)
     return {"reservation_vehicle_names": [n for n in names if n], "vehicles": vehicles}
+
+# ---------- ICS (iCalendar) calendar sync ----------
+from zoneinfo import ZoneInfo as _ZoneInfo
+
+_PRAGUE_TZ = _ZoneInfo("Europe/Prague")
+
+
+def _ics_unescape(s):
+    if s is None:
+        return None
+    return (s.replace("\\n", "\n").replace("\\N", "\n")
+             .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\"))
+
+
+def _ics_unfold(text):
+    """Unfold RFC5545 folded lines (continuation lines start with space or tab)."""
+    raw = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = []
+    for ln in raw:
+        if ln[:1] in (" ", "\t") and lines:
+            lines[-1] += ln[1:]
+        else:
+            lines.append(ln)
+    return lines
+
+
+def _parse_ics_events(text):
+    events = []
+    cur = None
+    for ln in _ics_unfold(text):
+        if ln == "BEGIN:VEVENT":
+            cur = {}
+            continue
+        if ln == "END:VEVENT":
+            if cur is not None:
+                events.append(cur)
+            cur = None
+            continue
+        if cur is None or ":" not in ln:
+            continue
+        name_part, value = ln.split(":", 1)
+        key = name_part.split(";", 1)[0].upper()
+        params = {}
+        if ";" in name_part:
+            for p in name_part.split(";")[1:]:
+                if "=" in p:
+                    pk, pv = p.split("=", 1)
+                    params[pk.upper()] = pv
+        cur[key] = {"value": value, "params": params}
+    return events
+
+
+def _parse_ics_dt(field):
+    """Return naive UTC datetime from an ICS date-time field dict."""
+    if not field:
+        return None
+    val = field["value"].strip()
+    params = field.get("params", {})
+    tzid = params.get("TZID")
+    try:
+        if val.endswith("Z"):
+            dt = datetime.strptime(val, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        elif "T" in val:
+            naive = datetime.strptime(val, "%Y%m%dT%H%M%S")
+            tz = _ZoneInfo(tzid) if tzid else _PRAGUE_TZ
+            dt = naive.replace(tzinfo=tz)
+        else:
+            naive = datetime.strptime(val, "%Y%m%d")
+            dt = naive.replace(tzinfo=_PRAGUE_TZ)
+    except (ValueError, Exception):
+        return None
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _parse_ics_summary(summary):
+    """SUMMARY like 'Vreštiak (B)\\nParkovani\\n[Ostrov, Učebna]'.
+    Returns (customer, activity, boarding_location, note)."""
+    text = _ics_unescape(summary) or ""
+    parts = [p.strip() for p in text.split("\n") if p.strip()]
+    customer = None
+    activity = None
+    boarding = None
+    notes = []
+    for i, p in enumerate(parts):
+        if p.startswith("[") and p.endswith("]"):
+            boarding = p[1:-1].strip()
+            continue
+        if i == 0:
+            m = _re.search(r"\(([^)]*)\)", p)
+            if m:
+                activity = m.group(1).strip()
+                customer = p[:m.start()].strip() or None
+            else:
+                customer = p
+        else:
+            low = p.lower()
+            if activity is None and any(k in low for k in ("ostatní", "nezapsan", "výcvik", "vycvik")):
+                activity = p
+            else:
+                notes.append(p)
+    return customer, activity, _norm_loc(boarding) if boarding else "", ("; ".join(notes) or None)
+
+
+async def _sync_instructor_ics(instr, settings, cache):
+    """Fetch + parse one instructor's ICS feed into reservation_drives. Returns count."""
+    url = (instr or {}).get("ics_url")
+    if not url:
+        return {"instructor": (instr or {}).get("name"), "events": 0, "error": "chybí ICS URL"}
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as http:
+            resp = await http.get(url)
+        if resp.status_code != 200:
+            return {"instructor": instr.get("name"), "events": 0, "error": f"HTTP {resp.status_code}"}
+        events = _parse_ics_events(resp.text)
+    except Exception as e:
+        return {"instructor": instr.get("name"), "events": 0, "error": str(e)}
+
+    batch_id = f"ics_{instr['instructor_id']}"
+    # preserve user-set private flags across re-sync
+    old = await db.reservation_drives.find({"batch_id": batch_id}, {"_id": 0, "uid": 1, "is_private": 1}).to_list(20000)
+    private_map = {o.get("uid"): o.get("is_private", False) for o in old if o.get("uid")}
+    await db.reservation_drives.delete_many({"batch_id": batch_id})
+
+    now = datetime.now(timezone.utc)
+    docs = []
+    for ev in events:
+        start = _parse_ics_dt(ev.get("DTSTART"))
+        end = _parse_ics_dt(ev.get("DTEND"))
+        if not start:
+            continue
+        duration_min = int(round((end - start).total_seconds() / 60)) if end else None
+        local_start = (start.replace(tzinfo=timezone.utc)).astimezone(_PRAGUE_TZ).replace(tzinfo=None)
+        vehicle_name = (ev.get("LOCATION", {}).get("value") or "").strip() or None
+        vehicle_id = await _match_or_create_vehicle(vehicle_name, cache) if vehicle_name else None
+        customer, activity, boarding, note = _parse_ics_summary(ev.get("SUMMARY", {}).get("value"))
+        uid = ev.get("UID", {}).get("value")
+        docs.append({
+            "drive_id": f"drv_{uuid.uuid4().hex[:12]}",
+            "batch_id": batch_id,
+            "source": "ics",
+            "uid": uid,
+            "date": local_start.date().isoformat(),
+            "start_datetime": local_start.isoformat(),
+            "start_utc": start.isoformat(),
+            "hours": round(duration_min / settings.get("minutes_per_hour_unit", 45), 2) if duration_min else None,
+            "duration_min": duration_min,
+            "teacher": instr.get("name"),
+            "instructor_id": instr.get("instructor_id"),
+            "vehicle_name": vehicle_name,
+            "vehicle_id": vehicle_id,
+            "boarding_location": boarding,
+            "activity": activity,
+            "customer": customer,
+            "reservation_km": None,
+            "tacho_start": None,
+            "tacho_end": None,
+            "note": note,
+            "is_private": bool(private_map.get(uid, False)),
+            "created_at": now.isoformat(),
+        })
+    if docs:
+        await db.reservation_drives.insert_many(docs)
+    await db.reservation_batches.update_one(
+        {"batch_id": batch_id},
+        {"$set": {"batch_id": batch_id, "filename": f"ICS · {instr.get('name')}", "count": len(docs),
+                  "skipped": 0, "source": "ics", "instructor_id": instr.get("instructor_id"),
+                  "created_at": now.isoformat(), "created_by": "ics-sync"}},
+        upsert=True,
+    )
+    return {"instructor": instr.get("name"), "events": len(docs), "error": None}
+
+
+@api_router.post("/reservations/sync-ics")
+async def sync_ics(request: Request, user: User = Depends(get_admin_user)):
+    """Sync drives from instructors' ICS calendar feeds. Body: {instructor_id?: str}."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    instructor_id = body.get("instructor_id")
+    query = {"instructor_id": instructor_id} if instructor_id else {}
+    instructors = await db.instructors.find(query, {"_id": 0}).to_list(500)
+    instructors = [i for i in instructors if i.get("ics_url")]
+    if not instructors:
+        raise HTTPException(status_code=400, detail="Žádný instruktor nemá nastavený ICS odkaz")
+    settings = await get_reservation_settings()
+    cache = {}
+    results = []
+    for instr in instructors:
+        results.append(await _sync_instructor_ics(instr, settings, cache))
+    total = sum(r["events"] for r in results)
+    return {"synced": len(results), "total_events": total, "results": results}
+
+
 
 
 

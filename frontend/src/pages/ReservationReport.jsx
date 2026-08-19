@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API, useAuth } from "../App";
-import { UploadSimple, Path, Warning, CheckCircle, MapPinLine, Trash, ArrowClockwise, EyeSlash } from "@phosphor-icons/react";
+import { UploadSimple, Path, Warning, CheckCircle, MapPinLine, Trash, ArrowClockwise, EyeSlash, CalendarPlus } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
@@ -14,6 +14,7 @@ export default function ReservationReport() {
   const isAdmin = user?.role !== "instructor";
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [batches, setBatches] = useState([]);
   const [vehicles, setVehicles] = useState([]);
   const [drives, setDrives] = useState([]);
@@ -81,6 +82,22 @@ export default function ReservationReport() {
     }
   };
 
+  const handleSyncIcs = async () => {
+    setSyncing(true);
+    try {
+      const res = await axios.post(`${API}/reservations/sync-ics`, {}, { withCredentials: true });
+      const errs = (res.data.results || []).filter((r) => r.error);
+      toast.success(`Synchronizováno ${res.data.total_events} jízd z ${res.data.synced} kalendářů`);
+      if (errs.length) toast.error(`Chyby: ${errs.map((e) => `${e.instructor}: ${e.error}`).join(", ")}`);
+      fetchBatches();
+      fetchDrives();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Synchronizace se nezdařila");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const deleteBatch = async (batchId) => {
     if (!window.confirm("Opravdu smazat tento import a všechny jeho jízdy?")) return;
     try {
@@ -132,10 +149,24 @@ export default function ReservationReport() {
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
-              <UploadSimple size={18} weight="duotone" /> Import z rezervačního systému
+              <UploadSimple size={18} weight="duotone" /> Načtení jízd
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-[#002FA7]/5 rounded-xl p-4">
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-[#18181B] flex items-center gap-1.5"><CalendarPlus size={16} weight="duotone" /> Synchronizace z kalendáře (ICS)</p>
+                <p className="text-xs text-[#71717A] mt-0.5">Načte aktuální jízdy z kalendářů učitelů (ICS odkaz nastavíte u instruktora).</p>
+              </div>
+              <Button onClick={handleSyncIcs} disabled={syncing} data-testid="sync-ics-btn">
+                <ArrowClockwise size={16} weight="bold" className="mr-1" /> {syncing ? "Synchronizuji…" : "Synchronizovat kalendáře"}
+              </Button>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="h-px bg-[#E4E4E7] flex-1" />
+              <span className="text-xs text-[#A1A1AA]">nebo nahrát export (.xls)</span>
+              <div className="h-px bg-[#E4E4E7] flex-1" />
+            </div>
             <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
               <input
                 type="file"
