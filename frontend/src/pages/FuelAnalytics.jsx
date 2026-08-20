@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { GasPump, TrendDown, TrendUp, Car } from "@phosphor-icons/react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Label } from "../components/ui/label";
@@ -18,7 +19,7 @@ export default function FuelAnalytics() {
     try {
       const res = await axios.get(`${API}/vehicles`, { withCredentials: true });
       setVehicles(res.data);
-    } catch { toast.error("Nepodařilo se načíst vozidla"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst vozidla")); }
   }, []);
 
   const fetchAnalytics = useCallback(async () => {
@@ -30,7 +31,7 @@ export default function FuelAnalytics() {
       if (filters.date_to) params.append("date_to", filters.date_to);
       const res = await axios.get(`${API}/reports/fuel-analytics?${params}`, { withCredentials: true });
       setData(res.data);
-    } catch { toast.error("Nepodařilo se načíst analytiku"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst analytiku")); }
     finally { setLoading(false); }
   }, [filters]);
 

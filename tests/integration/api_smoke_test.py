@@ -1,17 +1,19 @@
+# NOTE: live-server integration test — needs a running Fleet Manager.
+# Configure with FLEET_BASE_URL / FLEET_ADMIN_EMAIL / FLEET_ADMIN_PASSWORD.
+# Excluded from the default pytest run; see tests/integration/conftest.py.
 #!/usr/bin/env python3
 """
 Fleet Management API Testing Suite
 Tests all backend endpoints for the driving school fleet management system.
 """
 
+import os
 import requests
 import sys
-import json
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 class FleetAPITester:
-    def __init__(self, base_url: str = "https://feature-builder-53.preview.emergentagent.com/api"):
+    def __init__(self, base_url: str = ""):
         self.base_url = base_url
         self.session = requests.Session()
         self.session.headers.update({'Content-Type': 'application/json'})
@@ -509,9 +511,22 @@ class FleetAPITester:
         for test in results['passed_tests']:
             print(f"  - {test}")
 
+def _base_url_from_env() -> str:
+    """Base URL of the instance under test, e.g. http://localhost/api.
+
+    Previously a preview hostname was hard-coded here, so the script silently
+    tested somebody else's deployment.
+    """
+    base = os.environ.get("FLEET_BASE_URL", "").rstrip("/")
+    if not base:
+        print("FLEET_BASE_URL není nastaven, např. FLEET_BASE_URL=http://localhost")
+        sys.exit(2)
+    return base if base.endswith("/api") else base + "/api"
+
+
 def main():
     """Main test execution"""
-    tester = FleetAPITester()
+    tester = FleetAPITester(_base_url_from_env())
     results = tester.run_all_tests()
     tester.print_summary()
     

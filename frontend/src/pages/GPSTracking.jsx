@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { MapPin, Broadcast, Path, Cpu, Plus } from "@phosphor-icons/react";
+import { errorMessage } from "@/lib/api";
+import { Broadcast, Path, Cpu, Plus } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { toast } from "sonner";
 import "leaflet/dist/leaflet.css";
@@ -25,6 +26,8 @@ export default function GPSTracking() {
   const [importing, setImporting] = useState(false);
   const [selectedVehicle, setSelectedVehicle] = useState("");
   const [selectedTrip, setSelectedTrip] = useState(null);
+  const [selectedRoute, setSelectedRoute] = useState({ points: [], loading: false });
+  const [allowMockData, setAllowMockData] = useState(false);
 
   const [livePositions, setLivePositions] = useState([]);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -46,7 +49,7 @@ export default function GPSTracking() {
       ]);
       setTrips(tripsRes.data);
       setVehicles(vehiclesRes.data);
-    } catch { toast.error("Nepodařilo se načíst GPS data"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst GPS data")); }
     finally { setLoading(false); }
   }, [selectedVehicle]);
 
@@ -58,18 +61,54 @@ export default function GPSTracking() {
       ]);
       setDevices(devRes.data);
       setTcpStatus(statusRes.data);
-    } catch { toast.error("Nepodařilo se načíst zařízení"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst zařízení")); }
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
   useEffect(() => { if (tab === "devices") fetchDevices(); }, [tab, fetchDevices]);
+
+  // The demo-data generators are disabled in production, so do not offer a
+  // button the backend will refuse.
+  useEffect(() => {
+    let active = true;
+    axios
+      .get(`${API}/config`, { withCredentials: true })
+      .then((res) => { if (active) setAllowMockData(Boolean(res.data.allow_mock_data)); })
+      .catch(() => { if (active) setAllowMockData(false); });
+    return () => { active = false; };
+  }, []);
+
+  // The trip list no longer carries route points — a long history would ship
+  // megabytes of coordinates the list never draws. The route of the selected
+  // trip is fetched on demand and down-sampled server-side for the map; the
+  // stored GPS history itself is never trimmed.
+  useEffect(() => {
+    if (!selectedTrip?.trip_id) {
+      setSelectedRoute({ points: [], loading: false });
+      return undefined;
+    }
+    const controller = new AbortController();
+    setSelectedRoute({ points: [], loading: true });
+    axios
+      .get(`${API}/gps/trips/${selectedTrip.trip_id}/route`, {
+        withCredentials: true,
+        signal: controller.signal,
+      })
+      .then((res) => setSelectedRoute({ points: res.data.points || [], loading: false }))
+      .catch((err) => {
+        if (axios.isCancel(err) || err.name === "CanceledError") return;
+        setSelectedRoute({ points: [], loading: false });
+        toast.error(errorMessage(err, "Nepodařilo se načíst trasu jízdy"));
+      });
+    return () => controller.abort();
+  }, [selectedTrip?.trip_id]);
 
   const fetchLivePositions = useCallback(async () => {
     setLiveLoading(true);
     try {
       const res = await axios.get(`${API}/gps/live-positions`, { withCredentials: true });
       setLivePositions(res.data);
-    } catch { toast.error("Nepodařilo se načíst live pozice"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst live pozice")); }
     finally { setLiveLoading(false); }
   }, []);
 
@@ -77,7 +116,7 @@ export default function GPSTracking() {
     try {
       await axios.post(`${API}/gps/simulate-live`, {}, { withCredentials: true });
       await fetchLivePositions();
-    } catch { toast.error("Simulace selhala"); }
+    } catch (err) { toast.error(errorMessage(err, "Simulace selhala")); }
   }, [fetchLivePositions]);
 
   useEffect(() => { if (tab === "live") fetchLivePositions(); }, [tab, fetchLivePositions]);
@@ -96,7 +135,7 @@ export default function GPSTracking() {
       await axios.post(`${API}/gps/import-mock?vehicle_id=${vehicleId}`, {}, { withCredentials: true });
       toast.success("GPS data importována");
       fetchData();
-    } catch { toast.error("Nepodařilo se importovat data"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se importovat data")); }
     finally { setImporting(false); }
   };
 
@@ -105,7 +144,7 @@ export default function GPSTracking() {
       await axios.post(`${API}/gps/trips/${tripId}/sync-to-logbook`, {}, { withCredentials: true });
       toast.success("Synchronizováno do knihy jízd");
       fetchData();
-    } catch { toast.error("Nepodařilo se synchronizovat"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se synchronizovat")); }
   };
 
   const handleAddDevice = async (e) => {
@@ -117,7 +156,7 @@ export default function GPSTracking() {
       setDeviceForm({ imei: "", vehicle_id: "", name: "" });
       fetchDevices();
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Nepodařilo se registrovat");
+      toast.error(errorMessage(err, "Nepodařilo se registrovat"));
     }
   };
 
@@ -126,7 +165,7 @@ export default function GPSTracking() {
       await axios.delete(`${API}/gps/devices/${deviceId}`, { withCredentials: true });
       toast.success("Zařízení odstraněno");
       fetchDevices();
-    } catch { toast.error("Nepodařilo se odstranit"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se odstranit")); }
   };
 
   const handleTestDevice = async (device) => {
@@ -140,7 +179,7 @@ export default function GPSTracking() {
       } else {
         toast.error(`Test selhal: ${res.data.error}`);
       }
-    } catch { toast.error("Nepodařilo se provést test"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se provést test")); }
     finally { setTesting(false); }
   };
 
@@ -191,6 +230,8 @@ export default function GPSTracking() {
           setSelectedVehicle={setSelectedVehicle}
           selectedTrip={selectedTrip}
           setSelectedTrip={setSelectedTrip}
+          selectedRoute={selectedRoute}
+          allowMockData={allowMockData}
           importing={importing}
           handleImportMock={handleImportMock}
           handleSyncToLogbook={handleSyncToLogbook}

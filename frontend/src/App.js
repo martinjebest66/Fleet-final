@@ -29,8 +29,11 @@ import PublicHandoverForm from "./pages/PublicHandoverForm";
 import Layout from "./components/Layout";
 import { Toaster } from "./components/ui/sonner";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-export const API = `${BACKEND_URL}/api`;
+// API base URL and the shared axios configuration live in lib/api so a single
+// place decides how the frontend talks to the backend. Re-exported here
+// because every page imports `API` from "../App".
+export { API, BACKEND_URL } from "@/lib/api";
+import { API, setUnauthorizedHandler } from "@/lib/api";
 
 // Auth Context
 import { createContext, useContext } from "react";
@@ -83,8 +86,15 @@ const AuthProvider = ({ children }) => {
     setUser(null);
   }, []);
 
-  const contextValue = useMemo(() => ({ 
-    user, setUser, loading, logout, checkAuth 
+  // A 401 from any request means the session is gone; clear it once, centrally,
+  // instead of leaving each page to guess why its data never arrived.
+  useEffect(() => {
+    setUnauthorizedHandler(() => setUser(null));
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  const contextValue = useMemo(() => ({
+    user, setUser, loading, logout, checkAuth
   }), [user, loading, logout, checkAuth]);
 
   return (

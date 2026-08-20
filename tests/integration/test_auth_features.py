@@ -1,3 +1,6 @@
+# NOTE: live-server integration test — needs a running Fleet Manager.
+# Configure with FLEET_BASE_URL / FLEET_ADMIN_EMAIL / FLEET_ADMIN_PASSWORD.
+# Excluded from the default pytest run; see tests/integration/conftest.py.
 """
 Backend API tests for new auth features:
 1. Admin email/password login
@@ -9,11 +12,11 @@ import pytest
 import requests
 import os
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+BASE_URL = (os.environ.get('FLEET_BASE_URL') or os.environ.get('REACT_APP_BACKEND_URL', '')).rstrip('/')
 
 # Test credentials from environment
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@autoskola.cz")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin123!")
+ADMIN_EMAIL = os.environ.get("FLEET_ADMIN_EMAIL", os.environ.get("ADMIN_EMAIL", ""))
+ADMIN_PASSWORD = os.environ.get("FLEET_ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 TEST_INSTRUCTOR_ID = os.environ.get("TEST_INSTRUCTOR_ID", "inst_aba594d9cd55")
 TEST_INSTRUCTOR_PIN = os.environ.get("TEST_INSTRUCTOR_PIN", "1234")
 

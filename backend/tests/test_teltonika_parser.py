@@ -15,7 +15,6 @@ from teltonika import (
     build_imei_packet,
     _crc16_ibm,
     CODEC_8,
-    CODEC_8E
 )
 
 

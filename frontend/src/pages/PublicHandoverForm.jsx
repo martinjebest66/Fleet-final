@@ -9,8 +9,7 @@ import { HandoverFluidStep, FLUID_CHECKS } from "./handover/HandoverFluidStep";
 import { HandoverPhotoStep, PHOTO_STEPS } from "./handover/HandoverPhotoStep";
 import { HandoverReviewStep } from "./handover/HandoverReviewStep";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API, errorMessage } from "@/lib/api";
 const TOTAL_STEPS = 9;
 
 export default function PublicHandoverForm() {
@@ -68,7 +67,7 @@ export default function PublicHandoverForm() {
         [photoStepId]: { photo_type: photoStepId, photo_url: res.data.url, timestamp: new Date().toISOString() }
       }));
     } catch (err) {
-      toast.error("Nahrávání fotky selhalo");
+      toast.error(errorMessage(err, "Nahrávání fotky selhalo"));
     } finally {
       setUploadingPhoto(false);
     }
@@ -105,7 +104,7 @@ export default function PublicHandoverForm() {
       });
       setSuccess(true);
     } catch (err) {
-      setError(err.response?.data?.detail || "Nepodařilo se odeslat protokol");
+      setError(errorMessage(err, "Nepodařilo se odeslat protokol"));
     } finally {
       setSubmitting(false);
     }

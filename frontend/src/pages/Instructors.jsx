@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { User, Plus, Pencil, Trash, Phone, Envelope, Key } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -29,7 +30,7 @@ export default function Instructors() {
       setInstructors(instructorsRes.data);
       setVehicles(vehiclesRes.data);
     } catch (error) {
-      toast.error("Nepodařilo se načíst instruktory");
+      toast.error(errorMessage(error, "Nepodařilo se načíst instruktory"));
     } finally { setLoading(false); }
   }, []);
 
@@ -46,7 +47,7 @@ export default function Instructors() {
         toast.success("Instruktor přidán");
       }
       setShowModal(false); resetForm(); fetchData();
-    } catch (error) { toast.error("Nepodařilo se uložit instruktora"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se uložit instruktora")); }
   };
 
   const handleDelete = async () => {
@@ -54,12 +55,12 @@ export default function Instructors() {
       await axios.delete(`${API}/instructors/${selectedInstructor.instructor_id}`, { withCredentials: true });
       toast.success("Instruktor smazán");
       setShowDeleteDialog(false); setSelectedInstructor(null); fetchData();
-    } catch (error) { toast.error("Nepodařilo se smazat instruktora"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se smazat instruktora")); }
   };
 
   const openEditModal = (instructor) => {
     setSelectedInstructor(instructor);
-    setFormData({ name: instructor.name, email: instructor.email, phone: instructor.phone, license_number: instructor.license_number, assigned_vehicle_ids: instructor.assigned_vehicle_ids || [], pin: instructor.pin || "", ics_url: instructor.ics_url || "" });
+    setFormData({ name: instructor.name, email: instructor.email, phone: instructor.phone, license_number: instructor.license_number, assigned_vehicle_ids: instructor.assigned_vehicle_ids || [], pin: "", ics_url: instructor.ics_url || "" });
     setShowModal(true);
   };
 
@@ -99,7 +100,7 @@ export default function Instructors() {
                   <h3 className="font-semibold text-[#18181B]">{instructor.name}</h3>
                   <div className="flex items-center gap-2">
                     <p className="text-sm text-[#52525B]">{instructor.license_number}</p>
-                    {instructor.pin && <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 flex items-center gap-0.5"><Key size={10} />PIN</span>}
+                    {instructor.has_pin && <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 flex items-center gap-0.5"><Key size={10} />PIN</span>}
                   </div>
                 </div>
               </div>
@@ -137,8 +138,12 @@ export default function Instructors() {
             <div><Label>Číslo oprávnění *</Label><Input value={formData.license_number} onChange={(e) => setFormData({ ...formData, license_number: e.target.value })} required /></div>
             <div>
               <Label>PIN pro přihlášení</Label>
-              <Input type="text" inputMode="numeric" maxLength={6} value={formData.pin} onChange={(e) => setFormData({ ...formData, pin: e.target.value.replace(/\D/g, "") })} placeholder="4-6 místný PIN (volitelné)" className="font-mono tracking-widest" data-testid="instructor-pin-field" />
-              <p className="text-xs text-[#A1A1AA] mt-1">Nastavte PIN pro přihlášení instruktora do systému</p>
+              <Input type="text" inputMode="numeric" maxLength={6} value={formData.pin} onChange={(e) => setFormData({ ...formData, pin: e.target.value.replace(/\D/g, "") })} placeholder={selectedInstructor?.has_pin ? "Ponechte prázdné pro zachování PINu" : "4-6 místný PIN (volitelné)"} className="font-mono tracking-widest" data-testid="instructor-pin-field" />
+              <p className="text-xs text-[#A1A1AA] mt-1">
+                {selectedInstructor?.has_pin
+                  ? "PIN je uložen v zašifrované podobě a nelze jej zobrazit. Vyplňte pouze pokud jej chcete změnit."
+                  : "Nastavte PIN pro přihlášení instruktora do systému"}
+              </p>
             </div>
             <div>
               <Label>ICS odkaz na kalendář</Label>

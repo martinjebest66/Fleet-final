@@ -7,8 +7,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { format } from "date-fns";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API, errorMessage } from "@/lib/api";
 
 export default function PublicFuelForm() {
   const { qrCode } = useParams();
@@ -33,7 +32,7 @@ export default function PublicFuelForm() {
       setVehicle(res.data);
       setFormData(prev => ({ ...prev, odometer: res.data.odometer || 0 }));
     } catch (err) {
-      setError("Vozidlo nenalezeno nebo neplatný QR kód");
+      setError(errorMessage(err, "Vozidlo nenalezeno nebo neplatný QR kód"));
     } finally {
       setLoading(false);
     }
@@ -69,7 +68,7 @@ export default function PublicFuelForm() {
       });
       setSuccess(true);
     } catch (err) {
-      setError("Nepodařilo se odeslat záznam");
+      setError(errorMessage(err, "Nepodařilo se odeslat záznam"));
     } finally {
       setSubmitting(false);
     }

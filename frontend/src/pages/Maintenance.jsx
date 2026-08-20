@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { Wrench, Plus, Trash, PencilSimple, CalendarCheck, Warning, CheckCircle, Clock } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -54,7 +55,7 @@ export default function Maintenance() {
       setItems(itemsRes.data);
       setVehicles(vehiclesRes.data);
       setSummary(summaryRes.data);
-    } catch { toast.error("Nepodařilo se načíst údržbu"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst údržbu")); }
     finally { setLoading(false); }
   }, [filterVehicle, filterStatus]);
 
@@ -94,7 +95,7 @@ export default function Maintenance() {
         toast.success("Údržba vytvořena");
       }
       setShowModal(false); fetchData();
-    } catch { toast.error("Nepodařilo se uložit"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se uložit")); }
   };
 
   const handleDelete = async (id) => {
@@ -102,7 +103,7 @@ export default function Maintenance() {
     try {
       await axios.delete(`${API}/maintenance/${id}`, { withCredentials: true });
       toast.success("Smazáno"); fetchData();
-    } catch { toast.error("Nepodařilo se smazat"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se smazat")); }
   };
 
   const getTypeLabel = (type, customLabel) => {

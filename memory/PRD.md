@@ -45,8 +45,9 @@ Fleet management app for a driving school with vehicle/instructor management, dr
 - [x] ICS calendar sync per instructor (ics_url field): POST /api/reservations/sync-ics parses VEVENTs (DTSTART/DTEND UTC, LOCATION=vehicle, SUMMARY=customer/(group)/[boarding]), dedupe by UID, preserves private flag on re-sync
 
 ## Credentials
-- Admin: admin@autoskola.cz / Admin123!
-- Instructor: inst_aba594d9cd55 / PIN 1234
+- Admin: e-mail a heslo podle ADMIN_EMAIL / ADMIN_PASSWORD v .env (viz .env.example)
+- Instruktor: instructor_id + PIN nastavený v administraci
+  (Přihlašovací údaje se do repozitáře neukládají.)
 
 ## Email Notifications
 - Service: Resend (resend.com)

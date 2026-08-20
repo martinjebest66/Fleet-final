@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { API, useAuth } from "../App";
+import { errorMessage } from "@/lib/api";
 import { SignIn, Key, UserCircle, EnvelopeSimple, Lock } from "@phosphor-icons/react";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -28,7 +29,12 @@ export default function Login() {
     try {
       const res = await axios.get(`${API}/auth/instructors-list`);
       setInstructors(res.data);
-    } catch { toast.error("Nepodařilo se načíst instruktory"); }
+    } catch (err) {
+      // `toast` was never imported here: this handler used to throw a
+      // ReferenceError, so a failed instructor lookup left the dropdown empty
+      // with no message at all.
+      setError(errorMessage(err, "Nepodařilo se načíst seznam instruktorů"));
+    }
   }, []);
 
   useEffect(() => {

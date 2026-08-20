@@ -1,3 +1,6 @@
+# NOTE: live-server integration test — needs a running Fleet Manager.
+# Configure with FLEET_BASE_URL / FLEET_ADMIN_EMAIL / FLEET_ADMIN_PASSWORD.
+# Excluded from the default pytest run; see tests/integration/conftest.py.
 """
 Test suite for OBD-II diagnostics and GPS auto-trip detection features.
 Tests new endpoints: /api/obd/*, /api/gps/detect-trips/*, and Teltonika parser.
@@ -10,11 +13,11 @@ import sys
 # Add backend to path for teltonika import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+BASE_URL = (os.environ.get('FLEET_BASE_URL') or os.environ.get('REACT_APP_BACKEND_URL', '')).rstrip('/')
 
 # Test credentials
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@autoskola.cz")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin123!")
+ADMIN_EMAIL = os.environ.get("FLEET_ADMIN_EMAIL", os.environ.get("ADMIN_EMAIL", ""))
+ADMIN_PASSWORD = os.environ.get("FLEET_ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 INSTRUCTOR_ID = os.environ.get("TEST_INSTRUCTOR_ID", "inst_aba594d9cd55")
 INSTRUCTOR_PIN = os.environ.get("TEST_INSTRUCTOR_PIN", "1234")
 

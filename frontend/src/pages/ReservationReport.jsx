@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API, useAuth } from "../App";
+import { errorMessage } from "@/lib/api";
 import { UploadSimple, Path, Warning, CheckCircle, MapPinLine, Trash, ArrowClockwise, EyeSlash, CalendarPlus } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -84,7 +85,7 @@ export default function ReservationReport() {
       fetchBatches();
       fetchDrives();
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Import se nezdařil");
+      toast.error(errorMessage(err, "Import se nezdařil"));
     } finally {
       setUploading(false);
     }
@@ -117,7 +118,7 @@ export default function ReservationReport() {
       fetchDrives();
       fetchIcsStatus();
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Synchronizace se nezdařila");
+      toast.error(errorMessage(err, "Synchronizace se nezdařila"));
     } finally {
       setSyncing(false);
     }
@@ -146,7 +147,7 @@ export default function ReservationReport() {
         ? { ...d, is_private: res.data.is_private, route_hidden: res.data.is_private }
         : d));
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Nepodařilo se změnit soukromí");
+      toast.error(errorMessage(err, "Nepodařilo se změnit soukromí"));
     }
   };
 
