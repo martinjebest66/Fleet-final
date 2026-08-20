@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { MapContainer, TileLayer, Polyline, Marker, Popup } from "react-leaflet";
 import { MapPin, Download, Check, ArrowsClockwise } from "@phosphor-icons/react";
 import { Button } from "../../components/ui/button";
@@ -10,11 +11,21 @@ function formatDuration(start, end) {
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
-export function TripHistoryTab({ trips, vehicles, selectedVehicle, setSelectedVehicle, selectedTrip, setSelectedTrip, importing, handleImportMock, handleSyncToLogbook }) {
-  const mapCenter = selectedTrip?.route_points?.length > 0
-    ? [selectedTrip.route_points[0].lat, selectedTrip.route_points[0].lng]
+const SOURCE_BADGES = {
+  teltonika: { label: "GPS", className: "bg-blue-100 text-blue-700" },
+  ruhavik: { label: "Ruhavik", className: "bg-violet-100 text-violet-700" },
+  manual: { label: "Ručně", className: "bg-zinc-100 text-zinc-700" },
+  mock: { label: "Demo", className: "bg-amber-100 text-amber-700" },
+};
+
+export function TripHistoryTab({ trips, vehicles, selectedVehicle, setSelectedVehicle, selectedTrip, setSelectedTrip, selectedRoute, allowMockData, importing, handleImportMock, handleSyncToLogbook }) {
+  // Route points arrive from a separate request (see GPSTracking); fall back to
+  // any points already on the trip so the component works either way.
+  const points = selectedRoute?.points?.length ? selectedRoute.points : (selectedTrip?.route_points || []);
+  const mapCenter = points.length > 0
+    ? [points[0].lat, points[0].lng]
     : [50.0755, 14.4378];
-  const routePositions = selectedTrip?.route_points?.map(p => [p.lat, p.lng]) || [];
+  const routePositions = points.map(p => [p.lat, p.lng]);
 
   return (
     <>
@@ -26,8 +37,13 @@ export function TripHistoryTab({ trips, vehicles, selectedVehicle, setSelectedVe
             {vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}
           </SelectContent>
         </Select>
-        <Button onClick={() => handleImportMock(selectedVehicle !== "all" ? selectedVehicle : vehicles[0]?.vehicle_id)} className="bg-[#002FA7] hover:bg-[#002480]" disabled={importing || vehicles.length === 0}>
-          <Download size={20} className="mr-2" />{importing ? "Importuji..." : "Import GPS"}
+        {allowMockData && (
+          <Button onClick={() => handleImportMock(selectedVehicle !== "all" ? selectedVehicle : vehicles[0]?.vehicle_id)} className="bg-[#002FA7] hover:bg-[#002480]" disabled={importing || vehicles.length === 0}>
+            <Download size={20} className="mr-2" />{importing ? "Importuji..." : "Ukázková data"}
+          </Button>
+        )}
+        <Button asChild variant="outline">
+          <Link to="/ruhavik-import"><Download size={20} className="mr-2" />Import z Ruhaviku</Link>
         </Button>
       </div>
 
@@ -43,11 +59,18 @@ export function TripHistoryTab({ trips, vehicles, selectedVehicle, setSelectedVe
                       <p className="font-medium text-[#18181B]">{new Date(trip.start_time).toLocaleDateString("cs-CZ")}</p>
                       <p className="text-sm text-[#52525B]">{new Date(trip.start_time).toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit" })} - {new Date(trip.end_time).toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit" })}</p>
                     </div>
+                    <div className="flex items-center gap-1">
+                    {trip.source && SOURCE_BADGES[trip.source] && (
+                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${SOURCE_BADGES[trip.source].className}`}>
+                        {SOURCE_BADGES[trip.source].label}
+                      </span>
+                    )}
                     {trip.synced_to_logbook ? (
                       <span className="badge badge-success text-xs"><Check size={12} className="mr-1" />Sync</span>
                     ) : (
                       <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); handleSyncToLogbook(trip.trip_id); }} className="text-xs h-7"><ArrowsClockwise size={12} className="mr-1" />Sync</Button>
                     )}
+                    </div>
                   </div>
                   <div className="text-sm space-y-1">
                     <p className="text-[#52525B] truncate"><MapPin size={14} className="inline mr-1" />{trip.start_location?.address}</p>

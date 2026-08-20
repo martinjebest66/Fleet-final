@@ -1,8 +1,7 @@
-import { Handshake } from "@phosphor-icons/react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import { QRCodeSVG } from "qrcode.react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+import { BACKEND_URL } from "@/lib/api";
 
 const QR_TITLES = {
   fuel: "QR kód pro tankování",
@@ -21,7 +20,11 @@ function getQRUrl(vehicle, type) {
   if (type === "fuel") code = vehicle.qr_code_fuel;
   else if (type === "damage") code = vehicle.qr_code_damage;
   else code = vehicle.qr_code_handover || `handover_${vehicle.vehicle_id}`;
-  return `${BACKEND_URL}/${type}/${code}`;
+  // A QR code is scanned by a phone that has no page context, so the URL has
+  // to be absolute. BACKEND_URL is empty on a same-origin deployment, in which
+  // case the address the admin is currently using is the right public one.
+  const origin = BACKEND_URL || (typeof window !== "undefined" ? window.location.origin : "");
+  return `${origin}/${type}/${code}`;
 }
 
 export function VehicleQRModal({ open, onOpenChange, vehicle, qrType }) {

@@ -9,8 +9,7 @@ import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API, errorMessage } from "@/lib/api";
 
 export default function PublicDamageForm() {
   const { qrCode } = useParams();
@@ -33,7 +32,7 @@ export default function PublicDamageForm() {
       const res = await axios.get(`${API}/public/vehicle/${qrCode}`);
       setVehicle(res.data);
     } catch (err) {
-      setError("Vozidlo nenalezeno nebo neplatný QR kód");
+      setError(errorMessage(err, "Vozidlo nenalezeno nebo neplatný QR kód"));
     } finally {
       setLoading(false);
     }
@@ -54,7 +53,7 @@ export default function PublicDamageForm() {
         });
         setFormData(prev => ({ ...prev, photos: [...prev.photos, res.data.url] }));
       } catch (err) {
-        toast.error("Nahrávání fotky selhalo");
+        toast.error(errorMessage(err, "Nahrávání fotky selhalo"));
       }
     }
   };
@@ -76,7 +75,7 @@ export default function PublicDamageForm() {
       });
       setSuccess(true);
     } catch (err) {
-      setError("Nepodařilo se odeslat hlášení");
+      setError(errorMessage(err, "Nepodařilo se odeslat hlášení"));
     } finally {
       setSubmitting(false);
     }

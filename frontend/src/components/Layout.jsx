@@ -1,4 +1,4 @@
-import { Car, Users, BookOpen, GasPump, Warning, MapPin, ChartBar, Handshake, SignOut, List, Drop, Cpu, Engine, Wrench, CalendarCheck, FileArrowUp, Path, Gear } from "@phosphor-icons/react";
+import { Car, Users, BookOpen, GasPump, Warning, MapPin, ChartBar, Handshake, SignOut, List, Drop, Engine, Wrench, CalendarCheck, FileArrowUp, Path, Gear } from "@phosphor-icons/react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../App";
 import { useState, useMemo } from "react";

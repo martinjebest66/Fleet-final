@@ -1,7 +1,8 @@
-import { Cpu, NumberOne, NumberTwo, NumberThree, NumberFour, NumberFive, Check, Copy, Info } from "@phosphor-icons/react";
+import { Check, Copy, Info } from "@phosphor-icons/react";
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { toast } from "sonner";
 
 export default function TrackerSetup() {
@@ -11,7 +12,7 @@ export default function TrackerSetup() {
     try {
       const res = await axios.get(`${API}/gps/tcp-status`, { withCredentials: true });
       setTcpStatus(res.data);
-    } catch { toast.error("Nepodařilo se načíst stav serveru"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst stav serveru")); }
   }, []);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);

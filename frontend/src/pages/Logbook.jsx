@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { BookOpen, Plus, Trash, Download, Gps, FilePdf } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -39,7 +40,7 @@ export default function Logbook() {
       setEntries(entriesRes.data);
       setVehicles(vehiclesRes.data);
       setInstructors(instructorsRes.data);
-    } catch (error) { toast.error("Nepodařilo se načíst knihu jízd"); } 
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se načíst knihu jízd")); } 
     finally { setLoading(false); }
   }, [filters]);
 
@@ -54,7 +55,7 @@ export default function Logbook() {
       await axios.post(`${API}/logbook`, { ...formData, instructor_id: formData.instructor_id || null }, { withCredentials: true });
       toast.success("Záznam přidán");
       setShowModal(false); resetForm(); fetchData();
-    } catch (error) { toast.error("Nepodařilo se přidat záznam"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se přidat záznam")); }
   };
 
   const handleDelete = async (entryId) => {
@@ -62,7 +63,7 @@ export default function Logbook() {
     try {
       await axios.delete(`${API}/logbook/${entryId}`, { withCredentials: true });
       toast.success("Záznam smazán"); fetchData();
-    } catch (error) { toast.error("Nepodařilo se smazat záznam"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se smazat záznam")); }
   };
 
   const resetForm = () => {

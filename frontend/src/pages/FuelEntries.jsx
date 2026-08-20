@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { GasPump, Plus, Download } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -32,7 +33,7 @@ export default function FuelEntries() {
       ]);
       setEntries(entriesRes.data);
       setVehicles(vehiclesRes.data);
-    } catch (error) { toast.error("Nepodařilo se načíst záznamy"); } 
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se načíst záznamy")); } 
     finally { setLoading(false); }
   }, [filters]);
 
@@ -44,7 +45,7 @@ export default function FuelEntries() {
       await axios.post(`${API}/fuel`, formData, { withCredentials: true });
       toast.success("Tankování zaznamenáno");
       setShowModal(false); resetForm(); fetchData();
-    } catch (error) { toast.error("Nepodařilo se uložit"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se uložit")); }
   };
 
   const resetForm = () => {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { Engine, Thermometer, GasPump, Gauge, Lightning, Car, Warning, ArrowsClockwise } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { toast } from "sonner";
@@ -50,7 +51,7 @@ export default function OBDDiagnostics() {
     try {
       const res = await axios.get(`${API}/obd/vehicles`, { withCredentials: true });
       setObdData(res.data);
-    } catch { toast.error("Nepodařilo se načíst OBD data"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst OBD data")); }
     finally { setLoading(false); }
   }, []);
 
@@ -61,7 +62,7 @@ export default function OBDDiagnostics() {
     try {
       const res = await axios.post(`${API}/gps/detect-trips/${vehicleId}`, {}, { withCredentials: true });
       toast.success(res.data.message);
-    } catch { toast.error("Detekce selhala"); }
+    } catch (err) { toast.error(errorMessage(err, "Detekce selhala")); }
     finally { setDetecting(prev => ({ ...prev, [vehicleId]: false })); }
   };
 

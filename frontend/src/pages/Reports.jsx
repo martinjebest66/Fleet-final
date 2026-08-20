@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { ChartBar, Calendar, Download } from "@phosphor-icons/react";
+import { errorMessage } from "@/lib/api";
+import { ChartBar, Download } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -9,6 +10,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { toast } from "sonner";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 import { format, subDays, subMonths, startOfMonth, endOfMonth } from "date-fns";
+
+const SOURCE_LABELS = {
+  teltonika: "GPS tracker",
+  ruhavik: "Ruhavik",
+  manual: "Ruční záznam",
+  mock: "Ukázková data",
+};
 
 const chartTickSmall = { fontSize: 10 };
 const chartTickNormal = { fontSize: 12 };
@@ -18,7 +26,8 @@ export default function Reports() {
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState(null);
   const [filters, setFilters] = useState({
-    vehicle_id: "",
+    vehicle_id: "all",
+    source: "all",
     date_from: format(subDays(new Date(), 30), "yyyy-MM-dd"),
     date_to: format(new Date(), "yyyy-MM-dd"),
     preset: "month"
@@ -28,28 +37,45 @@ export default function Reports() {
     try {
       const res = await axios.get(`${API}/vehicles`, { withCredentials: true });
       setVehicles(res.data);
-    } catch { toast.error("Nepodařilo se načíst vozidla"); } 
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se načíst vozidla")); }
     finally { setLoading(false); }
   }, []);
 
-  const fetchStats = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      params.append("date_from", filters.date_from);
-      params.append("date_to", filters.date_to);
-      if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
-      const res = await axios.get(`${API}/reports/km-stats?${params}`, { withCredentials: true });
-      setStats(res.data);
-    } catch (error) { toast.error("Nepodařilo se načíst statistiky"); }
+  const buildParams = useCallback(() => {
+    const params = new URLSearchParams();
+    params.append("date_from", filters.date_from);
+    params.append("date_to", filters.date_to);
+    if (filters.vehicle_id && filters.vehicle_id !== "all") params.append("vehicle_id", filters.vehicle_id);
+    if (filters.source && filters.source !== "all") params.append("source", filters.source);
+    return params;
   }, [filters]);
+
+  const fetchStats = useCallback(async (signal) => {
+    try {
+      const res = await axios.get(`${API}/reports/km-stats?${buildParams()}`, {
+        withCredentials: true,
+        signal,
+      });
+      setStats(res.data);
+    } catch (error) {
+      // An aborted request is a superseded filter change, not a failure.
+      if (axios.isCancel(error) || error.name === "CanceledError") return;
+      toast.error(errorMessage(error, "Nepodařilo se načíst statistiky"));
+    }
+  }, [buildParams]);
 
   useEffect(() => {
     fetchVehicles();
   }, [fetchVehicles]);
 
+  // Aborting the previous request stops a slow reply to an old filter from
+  // overwriting the numbers for the filter now on screen.
   useEffect(() => {
-    if (filters.date_from && filters.date_to) fetchStats();
-  }, [filters, fetchStats]);
+    if (!filters.date_from || !filters.date_to) return undefined;
+    const controller = new AbortController();
+    fetchStats(controller.signal);
+    return () => controller.abort();
+  }, [filters.date_from, filters.date_to, fetchStats]);
 
   const handlePresetChange = (preset) => {
     const now = new Date();
@@ -64,13 +90,22 @@ export default function Reports() {
     setFilters({ ...filters, preset, date_from: format(from, "yyyy-MM-dd"), date_to: format(to, "yyyy-MM-dd") });
   };
 
-  const exportToCSV = () => {
-    if (!stats) return;
-    const headers = ["Datum", "Kilometry"];
-    const rows = stats.daily_stats.map(d => [d.date, d.km]);
-    const csv = [headers, ...rows].map(row => row.join(";")).join("\n");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `report-km-${format(new Date(), "yyyy-MM-dd")}.csv`; a.click();
+  const exportToCSV = async () => {
+    try {
+      const res = await axios.get(`${API}/reports/trips/export-csv?${buildParams()}`, {
+        withCredentials: true,
+        responseType: "blob",
+        timeout: 120000,
+      });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `jizdy-${format(new Date(), "yyyy-MM-dd")}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      toast.error(errorMessage(error, "Export se nezdařil"));
+    }
   };
 
   if (loading) return <div className="flex items-center justify-center h-64"><div className="loading-spinner"></div></div>;
@@ -86,7 +121,7 @@ export default function Reports() {
       </div>
 
       <div className="bg-white border border-[#E4E4E7] rounded-md p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
           <div><Label>Období</Label>
             <Select value={filters.preset} onValueChange={handlePresetChange}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -107,16 +142,31 @@ export default function Reports() {
               <SelectContent><SelectItem value="all">Všechna</SelectItem>{vehicles.map(v => <SelectItem key={v.vehicle_id} value={v.vehicle_id}>{v.brand} {v.model}</SelectItem>)}</SelectContent>
             </Select>
           </div>
-          <div className="flex items-end"><Button variant="outline" onClick={() => { setFilters({ vehicle_id: "all", date_from: format(subDays(new Date(), 30), "yyyy-MM-dd"), date_to: format(new Date(), "yyyy-MM-dd"), preset: "month" }); }} className="w-full">Reset</Button></div>
+          <div><Label>Zdroj jízd</Label>
+            <Select value={filters.source} onValueChange={(v) => setFilters({ ...filters, source: v })}>
+              <SelectTrigger data-testid="reports-source-select"><SelectValue placeholder="Všechny zdroje" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Všechny zdroje</SelectItem>
+                <SelectItem value="teltonika">GPS tracker</SelectItem>
+                <SelectItem value="ruhavik">Ruhavik</SelectItem>
+                <SelectItem value="manual">Ruční záznam</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-end"><Button variant="outline" onClick={() => { setFilters({ vehicle_id: "all", source: "all", date_from: format(subDays(new Date(), 30), "yyyy-MM-dd"), date_to: format(new Date(), "yyyy-MM-dd"), preset: "month" }); }} className="w-full">Reset</Button></div>
         </div>
       </div>
 
       {stats && (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-[#002FA7] text-white rounded-md p-6">
               <p className="text-sm opacity-80">Celkem km</p>
               <p className="text-3xl font-bold">{stats.total_km?.toLocaleString("cs-CZ")}</p>
+            </div>
+            <div className="bg-white border border-[#E4E4E7] rounded-md p-6">
+              <p className="text-sm text-[#52525B]">Počet jízd</p>
+              <p className="text-3xl font-bold text-[#18181B]">{stats.total_trips?.toLocaleString("cs-CZ") ?? 0}</p>
             </div>
             <div className="bg-white border border-[#E4E4E7] rounded-md p-6">
               <p className="text-sm text-[#52525B]">Průměr/den</p>
@@ -127,6 +177,21 @@ export default function Reports() {
               <p className="text-3xl font-bold text-[#18181B]">{stats.daily_stats?.length || 0}</p>
             </div>
           </div>
+
+          {stats.by_source && Object.keys(stats.by_source).length > 0 && (
+            <div className="bg-white border border-[#E4E4E7] rounded-md p-6">
+              <h3 className="font-semibold text-[#18181B] mb-4">Podle zdroje dat</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {Object.entries(stats.by_source).map(([src, data]) => (
+                  <div key={src} className="border border-[#E4E4E7] rounded-md p-4">
+                    <p className="text-sm text-[#52525B]">{SOURCE_LABELS[src] || src}</p>
+                    <p className="text-2xl font-bold text-[#18181B]">{data.distance_km?.toLocaleString("cs-CZ")} km</p>
+                    <p className="text-xs text-[#A1A1AA]">{data.trips} jízd</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-white border border-[#E4E4E7] rounded-md p-6">

@@ -1,0 +1,7 @@
+# Development and test dependencies. Not installed into the production image.
+-r requirements.txt
+
+pytest==9.0.2
+pytest-asyncio==1.4.0
+mongomock-motor==0.0.36         # in-memory MongoDB for the async test-suite
+requests==2.32.5                # used by the live-server integration scripts

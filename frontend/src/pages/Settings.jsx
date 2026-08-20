@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API, useAuth } from "../App";
+import { errorMessage } from "@/lib/api";
 import { Gear, Plus, Trash, FloppyDisk, MapPin } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -61,7 +62,7 @@ export default function Settings() {
       setS(res.data);
       toast.success("Nastavení uloženo");
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Uložení se nezdařilo");
+      toast.error(errorMessage(err, "Uložení se nezdařilo"));
     } finally {
       setSaving(false);
     }

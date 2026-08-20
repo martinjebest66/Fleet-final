@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { Handshake, Plus, Eye, Camera, Car } from "@phosphor-icons/react";
+import { errorMessage } from "@/lib/api";
+import { Handshake, Plus, Eye } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -37,7 +38,7 @@ export default function Handovers() {
       setProtocols(protocolsRes.data);
       setVehicles(vehiclesRes.data);
       setInstructors(instructorsRes.data);
-    } catch (error) { toast.error("Nepodařilo se načíst protokoly"); } 
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se načíst protokoly")); } 
     finally { setLoading(false); }
   }, [filters]);
 
@@ -49,7 +50,7 @@ export default function Handovers() {
       await axios.post(`${API}/handovers`, formData, { withCredentials: true });
       toast.success("Protokol vytvořen");
       setShowModal(false); resetForm(); fetchData();
-    } catch (error) { toast.error("Nepodařilo se vytvořit protokol"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se vytvořit protokol")); }
   };
 
   const resetForm = () => {
@@ -73,7 +74,7 @@ export default function Handovers() {
       try {
         const res = await axios.post(`${API}/upload`, fd, { withCredentials: true, headers: { "Content-Type": "multipart/form-data" } });
         setFormData(prev => ({ ...prev, photos: [...prev.photos, res.data.url] }));
-      } catch (error) { toast.error(`Nepodařilo se nahrát ${file.name}`); }
+      } catch (error) { toast.error(errorMessage(error, `Nepodařilo se nahrát ${file.name}`)); }
     }
   };
 

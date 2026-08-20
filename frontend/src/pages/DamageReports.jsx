@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
+import { errorMessage } from "@/lib/api";
 import { Warning, Plus, Eye, Check, X } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -31,7 +32,7 @@ export default function DamageReports() {
       ]);
       setReports(reportsRes.data);
       setVehicles(vehiclesRes.data);
-    } catch (error) { toast.error("Nepodařilo se načíst hlášení"); } 
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se načíst hlášení")); } 
     finally { setLoading(false); }
   }, [filters]);
 
@@ -43,14 +44,14 @@ export default function DamageReports() {
       await axios.post(`${API}/damages`, formData, { withCredentials: true });
       toast.success("Poškození nahlášeno");
       setShowModal(false); resetForm(); fetchData();
-    } catch (error) { toast.error("Nepodařilo se nahlásit"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se nahlásit")); }
   };
 
   const handleStatusChange = async (damageId, newStatus) => {
     try {
       await axios.put(`${API}/damages/${damageId}/status?status=${newStatus}`, {}, { withCredentials: true });
       toast.success("Status aktualizován"); fetchData();
-    } catch (error) { toast.error("Nepodařilo se aktualizovat"); }
+    } catch (error) { toast.error(errorMessage(error, "Nepodařilo se aktualizovat")); }
   };
 
   const resetForm = () => {
@@ -64,7 +65,7 @@ export default function DamageReports() {
       try {
         const res = await axios.post(`${API}/upload`, fd, { withCredentials: true, headers: { "Content-Type": "multipart/form-data" } });
         setFormData(prev => ({ ...prev, photos: [...prev.photos, res.data.url] }));
-      } catch (error) { toast.error(`Nepodařilo se nahrát ${file.name}`); }
+      } catch (error) { toast.error(errorMessage(error, `Nepodařilo se nahrát ${file.name}`)); }
     }
   };
 

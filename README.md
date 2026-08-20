@@ -1,1 +1,263 @@
-# Here are your Instructions
+# Fleet Manager
+
+Správa vozového parku autoškoly: vozidla, kniha jízd, tankování, poškození,
+předávací protokoly, údržba, GPS sledování (Teltonika FMB003), import jízd
+z Ruhaviku, synchronizace rezervačního kalendáře (ICS) a reporty.
+
+```
+Browser ──► Nginx :80 ──┬──► React build (SPA)
+                        └──► /api ──► FastAPI :8001 ──► MongoDB :27017
+                                          │
+Teltonika GPS tracker ──► TCP :5027 ───────┘
+```
+
+Frontend i API běží na **jednom originu**. Prohlížeč tedy posílá first-party
+cookies a CORS se vůbec neuplatní — proto je `REACT_APP_BACKEND_URL` normálně
+prázdný a frontend volá relativní `/api/...`.
+
+---
+
+## Rychlý start (Docker)
+
+```bash
+cp .env.example .env
+
+# Vygenerujte vlastní secret a heslo administrátora:
+python3 -c "import secrets; print(secrets.token_hex(32))"   # -> JWT_SECRET
+# ADMIN_PASSWORD zvolte vlastní, minimálně 10 znaků
+
+docker compose up -d --build
+docker compose logs -f app
+```
+
+Aplikace poběží na `http://<server>/`, health check na `http://<server>/api/health`.
+
+> **Pozor:** `docker compose down -v` smaže volume `mongo_data`, tedy celou
+> databázi (vozidla, kniha jízd, GPS historie). Na produkčním serveru ho
+> nepoužívejte. Pro restart stačí `docker compose restart` nebo
+> `docker compose up -d --build`.
+
+### Co se stane při špatné konfiguraci
+
+Aplikace **záměrně nenastartuje**, pokud:
+
+* `JWT_SECRET` chybí, je kratší než 32 znaků nebo jde o veřejně známou
+  výchozí hodnotu,
+* `ADMIN_PASSWORD` chybí, je kratší než 10 znaků nebo jde o známé výchozí heslo,
+* `CORS_ORIGINS=*` je zkombinováno s cookie autentizací,
+* `COOKIE_SAMESITE=none` bez `COOKIE_SECURE=true`.
+
+Důvod je v logu (`docker compose logs app`). Tiché použití známého secretu je
+horší než pád — kdokoli, kdo viděl tento repozitář, by mohl padělat tokeny.
+
+---
+
+## Konfigurace
+
+Všechny proměnné jsou popsané v [`.env.example`](.env.example). Nejdůležitější:
+
+| Proměnná | Výchozí | Význam |
+|---|---|---|
+| `JWT_SECRET` | — | **povinné**, podpis session tokenů |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | — | **povinné**, prvotní účet administrátora |
+| `ENVIRONMENT` | `production` | `development` uvolní kontroly a zapne ukázková data |
+| `MONGO_URL` / `DB_NAME` | `mongodb://mongodb:27017` / `fleet_manager` | databáze |
+| `COOKIE_SECURE` | `false` | nastavte `true`, pokud před aplikací terminujete TLS |
+| `COOKIE_SAMESITE` | `lax` | `none` jen při frontendu na jiné doméně (vyžaduje `COOKIE_SECURE=true`) |
+| `CORS_ORIGINS` | prázdné | seznam originů; prázdné = same-origin, middleware se vůbec nepřidá |
+| `REACT_APP_BACKEND_URL` | prázdné | build-time; prázdné = relativní `/api` |
+| `TELTONIKA_TCP_PORT` | `5027` | port TCP přijímače GPS trackerů |
+| `ALLOW_MOCK_DATA` | `false` (v produkci) | generátory ukázkových GPS dat |
+| `ADMIN_PASSWORD_RESET_ON_START` | `false` | přepsat heslo admina při každém startu |
+| `ICS_ALLOW_PRIVATE_HOSTS` | `false` | povolit ICS kalendáře na interních adresách |
+
+### HTTPS
+
+Nasazení za reverzní proxy s TLS (Caddy, Traefik, Nginx):
+
+```env
+COOKIE_SECURE=true
+COOKIE_SAMESITE=lax
+```
+
+Aplikace čte `X-Forwarded-Proto`; proxy ho musí posílat.
+
+### MongoDB
+
+Port `27017` **není** publikován na hostitele. Databáze běží bez autentizace
+a je dostupná jen v interní Docker síti. Pokud potřebujete přístup zvenčí,
+zapněte v MongoDB autentizaci a publikujte port cíleně (např. jen na
+`127.0.0.1`), nikoli na `0.0.0.0`.
+
+---
+
+## Teltonika GPS trackery
+
+Na trackeru nastavte server na veřejnou adresu tohoto hostitele, port `5027`,
+protokol TCP, Codec 8 nebo Codec 8 Extended.
+
+Poté v aplikaci (*GPS sledování → Zařízení*) zaregistrujte IMEI a přiřaďte ho
+k vozidlu. **Data z neregistrovaného IMEI se zahazují** — v logu se objeví
+`Neznámé IMEI …`.
+
+Přijímač:
+
+* rámuje pakety podle deklarované délky, takže zvládá jak rozdělený paket
+  napříč několika TCP čteními, tak více paketů v jednom čtení,
+* ověřuje CRC-16 a shodu počtu záznamů; vadný paket potvrdí nulou, takže ho
+  tracker pošle znovu,
+* nepotvrzuje záznamy, které se nepodařilo uložit — data se neztratí ani při
+  výpadku databáze,
+* stav najdete na `GET /api/gps/tcp-status`.
+
+Data se ukládají nezávisle na tom, zda má někdo otevřený frontend.
+
+---
+
+## Jízdy, zdroje dat a reporty
+
+Každá jízda má **zdroj**:
+
+| Zdroj | Odkud pochází |
+|---|---|
+| `teltonika` | záznam z GPS trackeru (přímý příjem nebo automatická detekce jízd) |
+| `ruhavik` | import z exportu Ruhaviku (CSV / GPX) |
+| `manual` | ručně zapsaná jízda v knize jízd |
+| `mock` | ukázková data — do reportů se **nezapočítávají** |
+
+Reporty čtou jízdy přes jednu společnou vrstvu (`backend/trips.py`), takže
+Ruhavik jízdy se počítají úplně stejně jako jízdy z trackeru — v přehledu
+jízd, v celkových kilometrech, ve statistikách vozidla i učitele, v knize
+jízd, v CSV i PDF exportu a na dashboardu. Filtrovat podle zdroje jde
+(`?source=ruhavik`), ale výchozí report zahrnuje všechny reálné zdroje.
+
+**Dvojí započítání** je ošetřeno na dvou místech:
+
+* záznam v knize jízd vytvořený synchronizací GPS jízdy (`gps_source: true`)
+  je jen projekcí té jízdy — počítá se jízda, ne projekce;
+* jízda importovaná z Ruhaviku, kterou už zaznamenal tracker, se uloží
+  s `duplicate_of` a do součtů nevstupuje. Záznam zůstane zachovaný,
+  s `?include_duplicates=true` ho report zobrazí.
+
+Detekce duplicity je záměrně opatrná: musí sedět vozidlo, **oba** konce jízdy
+do 10 minut a vzdálenost v toleranci. Dvě různé jízdy, které se jen podobají
+délkou nebo jsou ve stejný den, se nespojí.
+
+### Import z Ruhaviku je idempotentní
+
+Každá importovaná jízda dostane stabilní `external_id` — buď z exportu, nebo
+odvozené z vozidla, časů a vzdálenosti. Opakovaný import stejného souboru tedy
+nevytvoří duplicity; API vrátí počty:
+
+```json
+{
+  "imported": 12,
+  "skipped_already_imported": 40,
+  "duplicates_of_tracker": 3,
+  "rejected": 1,
+  "errors": ["řádek 7: nečitelný čas začátku jízdy"]
+}
+```
+
+Jeden vadný řádek nikdy neshodí zbytek souboru.
+
+---
+
+## Reportovací API
+
+| Endpoint | Popis |
+|---|---|
+| `GET /api/reports/trips` | jízdy ze všech zdrojů + souhrn |
+| `GET /api/reports/trips/export-csv` | CSV export téhož |
+| `GET /api/reports/km-stats` | kilometry po dnech a vozidlech |
+| `GET /api/reports/vehicle/{id}` | statistiky jednoho vozidla |
+| `GET /api/reports/instructor/{id}` | statistiky jednoho učitele |
+| `GET /api/reports/dashboard` | dashboard |
+| `GET /api/logbook/export-pdf` | kniha jízd v PDF (všechny zdroje) |
+
+Společné parametry: `date_from`, `date_to`, `vehicle_id`, `instructor_id`,
+`source`, `include_duplicates`.
+
+---
+
+## Vývoj
+
+### Backend
+
+```bash
+cd backend
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+
+export ENVIRONMENT=development
+export JWT_SECRET=dev-secret
+export MONGO_URL=mongodb://localhost:27017
+export DB_NAME=fleet_manager_dev
+export ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=dev-heslo-12345
+
+uvicorn server:app --reload --port 8001
+```
+
+### Frontend
+
+```bash
+cd frontend
+yarn install
+yarn start          # dev server na :3000, proxy na backend
+yarn lint
+yarn build
+```
+
+### Testy
+
+```bash
+pytest                       # jednotkové + API testy (bez serveru a bez DB)
+```
+
+Testy běží proti in-memory MongoDB, takže nepotřebují databázi ani nasazenou
+aplikaci. Pokrývají mimo jiné Teltonika parser a TCP rámování, import
+z Ruhaviku a jeho idempotenci, deduplikaci jízd, reporty přes všechny zdroje,
+autentizaci a autorizaci a kontrolu produkční konfigurace.
+
+Integrační testy proti běžící instanci:
+
+```bash
+FLEET_BASE_URL=http://localhost \
+FLEET_ADMIN_EMAIL=... FLEET_ADMIN_PASSWORD=... \
+pytest tests/integration
+```
+
+---
+
+## Struktura
+
+```
+backend/
+  server.py       API endpointy, autentizace, reporty, ICS, rezervace
+  config.py       konfigurace z prostředí + kontroly produkčního nasazení
+  database.py     připojení k MongoDB, čekání na start, indexy
+  trips.py        jednotný model jízdy a reportovací vrstva
+  ruhavik.py      parsování Ruhavik exportů + idempotentní import
+  teltonika.py    Codec 8 / 8E parser a TCP přijímač
+  tests/          jednotkové a API testy
+frontend/src/
+  lib/api.js      základní URL API, sdílený axios klient, ošetření 401
+  pages/          obrazovky aplikace
+deploy/
+  nginx.conf      reverzní proxy a servírování SPA
+  entrypoint.sh   spuštění Nginx + Uvicorn v jednom kontejneru
+tests/integration/  testy proti běžící instanci
+```
+
+## Diagnostika
+
+```bash
+docker compose logs -f app        # start, MongoDB, Teltonika, importy
+curl -s http://localhost/api/health
+```
+
+V logu najdete start aplikace a shrnutí konfigurace (bez secretů), připojení
+k MongoDB, stav TCP přijímače, připojení a odpojení trackerů včetně IMEI
+a počtu přijatých AVL záznamů, chyby parsování paketů, výsledky Ruhavik
+importů a chyby ICS synchronizace. Hesla, tokeny ani cookies se do logu
+nezapisují.

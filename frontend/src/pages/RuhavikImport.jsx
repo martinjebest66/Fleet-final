@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
-import { MapPin, UploadSimple, FileArrowUp, CheckCircle, Info } from "@phosphor-icons/react";
+import { errorMessage } from "@/lib/api";
+import { UploadSimple, FileArrowUp, CheckCircle, Info } from "@phosphor-icons/react";
 import { Button } from "../components/ui/button";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
@@ -18,7 +19,7 @@ export default function RuhavikImport() {
     try {
       const res = await axios.get(`${API}/vehicles`, { withCredentials: true });
       setVehicles(res.data);
-    } catch { toast.error("Nepodařilo se načíst vozidla"); }
+    } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst vozidla")); }
   }, []);
 
   useEffect(() => { fetchVehicles(); }, [fetchVehicles]);
@@ -49,13 +50,15 @@ export default function RuhavikImport() {
       fd.append("file", file);
       const res = await axios.post(`${API}/gps/import-ruhavik`, fd, {
         withCredentials: true,
+        // Imports parse the whole file server-side; the default timeout is too
+        // short for a long GPX history.
+        timeout: 180000,
         headers: { "Content-Type": "multipart/form-data" }
       });
       setResult(res.data);
       toast.success(res.data.message);
     } catch (err) {
-      const msg = err.response?.data?.detail || "Nepodařilo se importovat";
-      toast.error(msg);
+      toast.error(errorMessage(err, "Nepodařilo se importovat"));
     } finally {
       setUploading(false);
     }
@@ -75,9 +78,11 @@ export default function RuhavikImport() {
           <p className="font-semibold mb-1">Podporované formáty</p>
           <ul className="list-disc list-inside space-y-1">
             <li><strong>GPX</strong> — standardní formát GPS tras (doporučeno)</li>
-            <li><strong>CSV</strong> — export z Ruhaviku se sloupci: latitude, longitude, timestamp, speed</li>
+            <li><strong>CSV bodů</strong> — sloupce latitude, longitude, timestamp, speed</li>
+            <li><strong>CSV jízd</strong> — sloupce start / end / distance (jeden řádek = jedna jízda)</li>
           </ul>
-          <p className="mt-2">Trasy budou automaticky rozděleny podle časových mezer (15+ minut = nová trasa).</p>
+          <p className="mt-2">Body se automaticky rozdělí na jízdy podle časových mezer (15+ minut = nová jízda).</p>
+          <p className="mt-1">Opakovaný import stejného souboru nevytvoří duplicity — již známé jízdy se přeskočí.</p>
         </div>
       </div>
 
@@ -137,18 +142,35 @@ export default function RuhavikImport() {
             <CheckCircle size={28} weight="duotone" className="text-emerald-600 shrink-0" />
             <div>
               <h3 className="font-semibold text-emerald-800">{result.message}</h3>
-              <div className="mt-2 grid grid-cols-2 gap-4 text-sm">
+              <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                 <div>
-                  <p className="text-emerald-600">GPS bodů zpracováno</p>
-                  <p className="text-lg font-bold text-emerald-800">{result.points_count}</p>
+                  <p className="text-emerald-600">Nově importováno</p>
+                  <p className="text-lg font-bold text-emerald-800">{result.imported ?? 0}</p>
                 </div>
                 <div>
-                  <p className="text-emerald-600">Tras vytvořeno</p>
-                  <p className="text-lg font-bold text-emerald-800">{result.trips_count}</p>
+                  <p className="text-emerald-600">Již importováno dříve</p>
+                  <p className="text-lg font-bold text-emerald-800">{result.skipped_already_imported ?? 0}</p>
+                </div>
+                <div>
+                  <p className="text-emerald-600">Duplicita GPS jízdy</p>
+                  <p className="text-lg font-bold text-emerald-800">{result.duplicates_of_tracker ?? 0}</p>
+                </div>
+                <div>
+                  <p className="text-emerald-600">Chybné záznamy</p>
+                  <p className="text-lg font-bold text-emerald-800">{result.rejected ?? 0}</p>
                 </div>
               </div>
+              {result.errors?.length > 0 && (
+                <details className="mt-3 text-xs text-emerald-700">
+                  <summary className="cursor-pointer font-medium">Zobrazit chybné záznamy ({result.errors.length})</summary>
+                  <ul className="mt-1 list-disc list-inside space-y-0.5">
+                    {result.errors.map((err) => <li key={err}>{err}</li>)}
+                  </ul>
+                </details>
+              )}
               <p className="text-xs text-emerald-600 mt-3">
-                Trasy najdete na stránce GPS sledování. Odtud je můžete synchronizovat do knihy jízd.
+                Importované jízdy se okamžitě započítávají do reportů a knihy jízd stejně jako jízdy z GPS trackeru.
+                Jízdy označené jako duplicita se do součtů nezapočítávají dvakrát.
               </p>
             </div>
           </div>

@@ -1,3 +1,6 @@
+# NOTE: live-server integration test — needs a running Fleet Manager.
+# Configure with FLEET_BASE_URL / FLEET_ADMIN_EMAIL / FLEET_ADMIN_PASSWORD.
+# Excluded from the default pytest run; see tests/integration/conftest.py.
 """
 Fleet Management API Tests - Iteration 7
 Tests for new features: Teltonika FMB003 GPS tracker TCP receiver with Codec 8/8E parser
@@ -14,7 +17,7 @@ import pytest
 import requests
 import os
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+BASE_URL = (os.environ.get('FLEET_BASE_URL') or os.environ.get('REACT_APP_BACKEND_URL', '')).rstrip('/')
 
 class TestHealthCheck:
     """Health check endpoint tests"""

@@ -1,19 +1,19 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse, StreamingResponse
-from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import io
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+from contextlib import asynccontextmanager
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
 import base64
 import secrets
+import struct
 import bcrypt
 import jwt
 from reportlab.lib import colors
@@ -21,34 +21,41 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from teltonika import TeltonikaTCPServer, parse_avl_packet, build_test_avl_packet, build_imei_packet
+from teltonika import TeltonikaTCPServer, build_avl_packet, build_imei_packet
 import resend
 import asyncio
-import xml.etree.ElementTree as ET
 import csv as csv_module
 
+from pymongo.errors import BulkWriteError, PyMongoError
+
+import database
+import ruhavik as ruhavik_import
+import trips as trips_service
+from config import ConfigError, settings
+
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Configure logging before anything else so startup problems are visible in
+# `docker compose logs`.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("fleet.api")
 
-# Create the main app
-app = FastAPI()
+# MongoDB handle. The connection itself is established lazily and verified
+# during startup (see `startup_tasks`), so an unavailable database delays
+# readiness instead of crashing the import.
+db = database.get_db()
+
+app = FastAPI(
+    title="Fleet Manager API",
+    description="Správa vozového parku autoškoly",
+    version="1.1.0",
+)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # ======================== MODELS ========================
 
@@ -105,11 +112,38 @@ class InstructorCreate(BaseModel):
     email: str
     phone: str
     license_number: str
-    assigned_vehicle_ids: List[str] = []
-    pin: Optional[str] = None  # 4-6 digit PIN for instructor login
+    assigned_vehicle_ids: List[str] = Field(default_factory=list)
+    pin: Optional[str] = None  # 4-6 digit PIN for instructor login; blank keeps the current one
     ics_url: Optional[str] = None  # statický odkaz na ICS kalendář učitele
 
+    @field_validator("pin")
+    @classmethod
+    def _validate_pin(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        value = value.strip()
+        if not value.isdigit() or not (4 <= len(value) <= 6):
+            raise ValueError("PIN musí být 4 až 6 číslic")
+        return value
+
+    @field_validator("ics_url")
+    @classmethod
+    def _validate_ics_url(cls, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if not value.lower().startswith(("http://", "https://", "webcal://")):
+            raise ValueError("ICS odkaz musí začínat http://, https:// nebo webcal://")
+        return value
+
 class Instructor(BaseModel):
+    """Instructor as returned by the API.
+
+    The PIN is intentionally absent: it is a login credential and is stored
+    hashed. Clients only need to know whether one is set.
+    """
     model_config = ConfigDict(extra="ignore")
     instructor_id: str
     name: str
@@ -117,7 +151,7 @@ class Instructor(BaseModel):
     phone: str
     license_number: str
     assigned_vehicle_ids: List[str] = []
-    pin: Optional[str] = None
+    has_pin: bool = False
     ics_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -244,6 +278,10 @@ class GPSTrip(BaseModel):
     trip_id: str
     vehicle_id: str
     vehicle_info: Optional[str] = None
+    # Origin of the drive: teltonika | ruhavik | manual | mock. Always present
+    # so a report can tell where a trip came from without guessing.
+    source: str = trips_service.SOURCE_TELTONIKA
+    duplicate_of: Optional[str] = None
     start_time: datetime
     end_time: datetime
     start_location: dict  # {lat, lng, address}
@@ -357,14 +395,23 @@ class MaintenanceItem(BaseModel):
 
 # ======================== PASSWORD & JWT HELPERS ========================
 
-JWT_ALGORITHM = "HS256"
+JWT_ALGORITHM = settings.jwt_algorithm
+ACCESS_TOKEN_MAX_AGE = settings.access_token_hours * 3600
+REFRESH_TOKEN_MAX_AGE = settings.refresh_token_days * 86400
+SESSION_MAX_AGE = settings.session_days * 86400
 
 
 def get_jwt_secret() -> str:
-    secret = os.environ.get("JWT_SECRET")
-    if not secret:
+    """Return the configured JWT secret.
+
+    There is deliberately no fallback value: a build-in default secret would
+    let anyone who has read this repository mint valid tokens. Startup refuses
+    to run without one, so reaching this error means the process was started
+    outside the normal path.
+    """
+    if not settings.jwt_secret:
         raise HTTPException(status_code=500, detail="JWT_SECRET není nakonfigurován")
-    return secret
+    return settings.jwt_secret
 
 
 def hash_password(password: str) -> str:
@@ -372,14 +419,24 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    if not plain or not hashed:
+        return False
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except ValueError:
+        # Stored value is not a bcrypt hash (legacy/corrupt record).
+        return False
+
+
+def _is_bcrypt_hash(value: Optional[str]) -> bool:
+    return bool(value) and value.startswith(("$2a$", "$2b$", "$2y$"))
 
 
 def create_access_token(user_id: str, role: str) -> str:
     payload = {
         "sub": user_id,
         "role": role,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=12),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=settings.access_token_hours),
         "type": "access",
     }
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
@@ -388,15 +445,98 @@ def create_access_token(user_id: str, role: str) -> str:
 def create_refresh_token(user_id: str) -> str:
     payload = {
         "sub": user_id,
-        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        "exp": datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_days),
         "type": "refresh",
     }
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
+def _cookie_kwargs(max_age: int) -> dict:
+    """Cookie attributes derived from configuration.
+
+    The previous hard-coded ``Secure`` + ``SameSite=None`` combination is
+    rejected by browsers over plain HTTP, which is the default for a Docker
+    deployment behind Nginx: the login request succeeded but the cookie was
+    never stored, so every following request came back 401 and the UI looked
+    like "the data does not load". The attributes now follow the deployment:
+    same-origin over HTTP by default, ``Secure`` once TLS is configured.
+    """
+    kwargs = {
+        "httponly": True,
+        "secure": settings.cookie_secure,
+        "samesite": settings.cookie_samesite,
+        "max_age": max_age,
+        "path": "/",
+    }
+    if settings.cookie_domain:
+        kwargs["domain"] = settings.cookie_domain
+    return kwargs
+
+
 def _set_auth_cookies(response: Response, access_token: str, refresh_token: str):
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="none", max_age=43200, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="none", max_age=604800, path="/")
+    response.set_cookie(key="access_token", value=access_token, **_cookie_kwargs(ACCESS_TOKEN_MAX_AGE))
+    response.set_cookie(key="refresh_token", value=refresh_token, **_cookie_kwargs(REFRESH_TOKEN_MAX_AGE))
+
+
+def _clear_auth_cookies(response: Response):
+    for name in ("session_token", "access_token", "refresh_token"):
+        response.delete_cookie(
+            key=name,
+            path="/",
+            domain=settings.cookie_domain or None,
+            secure=settings.cookie_secure,
+            samesite=settings.cookie_samesite,
+        )
+
+
+# ── Brute-force protection ──────────────────────────────────────
+# Small in-process sliding window. The deployment runs a single Uvicorn worker
+# per container, which is what this protects; a multi-node setup should put a
+# rate limit in front of the app as well.
+_login_attempts: dict = {}
+
+
+def _rate_limit_key(request: Request, identifier: str) -> str:
+    client_host = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_host = forwarded.split(",")[0].strip()
+    return f"{client_host}|{identifier}"
+
+
+def check_login_rate_limit(request: Request, identifier: str) -> None:
+    """Raise 429 when an identifier/IP pair exceeds the configured attempts."""
+    now = datetime.now(timezone.utc).timestamp()
+    window = settings.login_rate_limit_window_sec
+    key = _rate_limit_key(request, identifier)
+
+    attempts = [ts for ts in _login_attempts.get(key, []) if now - ts < window]
+    if len(attempts) >= settings.login_rate_limit_attempts:
+        retry_after = int(window - (now - attempts[0])) + 1
+        logger.warning("Rate limit hit for login attempt (key hash %s)", hash(key) & 0xFFFF)
+        raise HTTPException(
+            status_code=429,
+            detail="Příliš mnoho pokusů o přihlášení. Zkuste to prosím později.",
+            headers={"Retry-After": str(max(1, retry_after))},
+        )
+    _login_attempts[key] = attempts
+
+
+def record_failed_login(request: Request, identifier: str) -> None:
+    key = _rate_limit_key(request, identifier)
+    now = datetime.now(timezone.utc).timestamp()
+    window = settings.login_rate_limit_window_sec
+    attempts = [ts for ts in _login_attempts.get(key, []) if now - ts < window]
+    attempts.append(now)
+    _login_attempts[key] = attempts
+    if len(_login_attempts) > 10000:  # bound memory on a hostile client
+        cutoff = now - window
+        for stale_key in [k for k, v in _login_attempts.items() if not v or v[-1] < cutoff]:
+            _login_attempts.pop(stale_key, None)
+
+
+def clear_login_attempts(request: Request, identifier: str) -> None:
+    _login_attempts.pop(_rate_limit_key(request, identifier), None)
 
 
 # ======================== HELPERS ========================
@@ -417,11 +557,15 @@ def parse_expires_at(value) -> datetime:
     return value
 
 
+def _vehicle_label(vehicle: dict) -> str:
+    return f"{vehicle.get('brand', '')} {vehicle.get('model', '')} ({vehicle.get('registration_plate', '')})".strip()
+
+
 async def enrich_vehicle_info(doc: dict):
     """Add vehicle_info string to a document that has vehicle_id."""
-    vehicle = await db.vehicles.find_one({"vehicle_id": doc["vehicle_id"]}, {"_id": 0})
+    vehicle = await db.vehicles.find_one({"vehicle_id": doc.get("vehicle_id")}, {"_id": 0})
     if vehicle:
-        doc["vehicle_info"] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
+        doc["vehicle_info"] = _vehicle_label(vehicle)
 
 
 async def enrich_instructor_name(doc: dict):
@@ -430,6 +574,43 @@ async def enrich_instructor_name(doc: dict):
         instructor = await db.instructors.find_one({"instructor_id": doc["instructor_id"]}, {"_id": 0})
         if instructor:
             doc["instructor_name"] = instructor["name"]
+
+
+async def enrich_many(docs: List[dict], with_instructor: bool = False) -> List[dict]:
+    """Attach vehicle (and optionally instructor) labels to a list of documents.
+
+    Two queries in total, regardless of list length. The per-document helpers
+    above issued one query per row, which meant a thousand round trips for a
+    single logbook page.
+    """
+    if not docs:
+        return docs
+
+    vehicle_ids = {d.get("vehicle_id") for d in docs if d.get("vehicle_id")}
+    if vehicle_ids:
+        vehicles = await db.vehicles.find(
+            {"vehicle_id": {"$in": list(vehicle_ids)}},
+            {"_id": 0, "vehicle_id": 1, "brand": 1, "model": 1, "registration_plate": 1},
+        ).to_list(len(vehicle_ids) + 10)
+        labels = {v["vehicle_id"]: _vehicle_label(v) for v in vehicles}
+        for doc in docs:
+            label = labels.get(doc.get("vehicle_id"))
+            if label:
+                doc["vehicle_info"] = label
+
+    if with_instructor:
+        instructor_ids = {d.get("instructor_id") for d in docs if d.get("instructor_id")}
+        if instructor_ids:
+            instructors = await db.instructors.find(
+                {"instructor_id": {"$in": list(instructor_ids)}},
+                {"_id": 0, "instructor_id": 1, "name": 1},
+            ).to_list(len(instructor_ids) + 10)
+            names = {i["instructor_id"]: i.get("name") for i in instructors}
+            for doc in docs:
+                name = names.get(doc.get("instructor_id"))
+                if name:
+                    doc["instructor_name"] = name
+    return docs
 
 
 # ======================== EMAIL NOTIFICATION HELPER ========================
@@ -474,9 +655,11 @@ async def send_damage_notification(damage_report: dict, vehicle_info: str):
             "html": html
         }
         await asyncio.to_thread(resend.Emails.send, params)
-        logger.info("Damage notification email sent to %s", admin_email)
-    except Exception as e:
-        logger.error("Failed to send damage email: %s", e)
+        logger.info("Notifikace o poškození odeslána na %s", admin_email)
+    except Exception:
+        # A failing notification must never block the damage report itself, but
+        # the cause has to be visible in the log.
+        logger.exception("Odeslání e-mailu o poškození selhalo")
 
 
 def compute_maintenance_status(item: dict) -> str:
@@ -559,8 +742,10 @@ async def _try_jwt_auth(request: Request) -> Optional[User]:
             return User(**user_doc)
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         return None
-    except Exception:
-        # Never let JWT parsing errors 500 the request; fall back to session auth
+    except (KeyError, ValueError, TypeError):
+        # Malformed token payload — treat as "not authenticated by JWT" and let
+        # session auth have a go, but record it: a burst of these is a bug.
+        logger.warning("Nečitelný obsah JWT tokenu", exc_info=True)
         return None
 
 
@@ -602,14 +787,26 @@ async def get_admin_user(request: Request) -> User:
 
 async def _fetch_emergent_session(session_id: str) -> dict:
     """Call Emergent Auth to validate session_id and return session data."""
-    async with httpx.AsyncClient() as http_client:
-        auth_response = await http_client.get(
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": session_id}
-        )
-        if auth_response.status_code != 200:
-            raise HTTPException(status_code=401, detail="Neplatný session_id")
-        return auth_response.json()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as http_client:
+            auth_response = await http_client.get(
+                settings.emergent_auth_url,
+                headers={"X-Session-ID": session_id},
+            )
+    except httpx.HTTPError as exc:
+        logger.error("Ověření OAuth session selhalo: %s", exc)
+        raise HTTPException(status_code=502, detail="Ověřovací službu se nepodařilo kontaktovat") from exc
+
+    if auth_response.status_code != 200:
+        logger.info("OAuth session odmítnuta poskytovatelem (HTTP %s)", auth_response.status_code)
+        raise HTTPException(status_code=401, detail="Neplatný session_id")
+    try:
+        data = auth_response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="Neplatná odpověď ověřovací služby") from exc
+    if not data.get("email") or not data.get("session_token"):
+        raise HTTPException(status_code=502, detail="Neúplná odpověď ověřovací služby")
+    return data
 
 
 async def _upsert_user(session_data: dict) -> str:
@@ -664,11 +861,7 @@ async def process_session(request: Request, response: Response):
     response.set_cookie(
         key="session_token",
         value=session_data["session_token"],
-        httponly=True,
-        secure=True,
-        samesite="none",
-        max_age=7*24*60*60,
-        path="/"
+        **_cookie_kwargs(SESSION_MAX_AGE),
     )
 
     user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
@@ -676,19 +869,24 @@ async def process_session(request: Request, response: Response):
 
 
 @api_router.post("/auth/login")
-async def admin_login(data: AdminLoginRequest, response: Response):
-    """Admin login with email/password"""
+async def admin_login(data: AdminLoginRequest, request: Request, response: Response):
+    """Admin login with email/password."""
     email = data.email.lower().strip()
+    check_login_rate_limit(request, email)
+
     user_doc = await db.users.find_one({"email": email}, {"_id": 0})
-    if not user_doc or not user_doc.get("password_hash"):
+    if not user_doc or not verify_password(data.password, user_doc.get("password_hash") or ""):
+        record_failed_login(request, email)
+        # Deliberately identical message for "unknown user" and "wrong
+        # password" so the endpoint cannot be used to enumerate accounts.
+        logger.info("Neúspěšné přihlášení pro %s", email)
         raise HTTPException(status_code=401, detail="Neplatné přihlašovací údaje")
 
-    if not verify_password(data.password, user_doc["password_hash"]):
-        raise HTTPException(status_code=401, detail="Neplatné přihlašovací údaje")
-
+    clear_login_attempts(request, email)
     access = create_access_token(user_doc["user_id"], user_doc.get("role", "admin"))
     refresh = create_refresh_token(user_doc["user_id"])
     _set_auth_cookies(response, access, refresh)
+    logger.info("Přihlášen uživatel %s (role %s)", email, user_doc.get("role", "admin"))
 
     return {
         "user_id": user_doc["user_id"],
@@ -698,22 +896,46 @@ async def admin_login(data: AdminLoginRequest, response: Response):
     }
 
 
+async def verify_instructor_pin(instructor: dict, pin: str) -> bool:
+    """Check an instructor PIN, upgrading legacy plaintext PINs on success.
+
+    PINs used to be stored in clear text. They are hashed from now on; an
+    existing plaintext PIN still authenticates once and is immediately
+    replaced by its hash, so no instructor is locked out by the change.
+    """
+    stored = instructor.get("pin")
+    if not stored:
+        return False
+    if _is_bcrypt_hash(stored):
+        return verify_password(pin, stored)
+    if secrets.compare_digest(str(stored), str(pin)):
+        await db.instructors.update_one(
+            {"instructor_id": instructor["instructor_id"]},
+            {"$set": {"pin": hash_password(pin)}},
+        )
+        logger.info("PIN instruktora %s byl převeden na hash", instructor["instructor_id"])
+        return True
+    return False
+
+
 @api_router.post("/auth/instructor-login")
-async def instructor_login(data: InstructorLoginRequest, response: Response):
-    """Instructor login with ID + PIN"""
+async def instructor_login(data: InstructorLoginRequest, request: Request, response: Response):
+    """Instructor login with ID + PIN."""
+    check_login_rate_limit(request, f"instr:{data.instructor_id}")
+
     instructor = await db.instructors.find_one(
         {"instructor_id": data.instructor_id}, {"_id": 0}
     )
-    if not instructor:
+    if not instructor or not await verify_instructor_pin(instructor, data.pin):
+        record_failed_login(request, f"instr:{data.instructor_id}")
+        logger.info("Neúspěšné přihlášení instruktora %s", data.instructor_id)
         raise HTTPException(status_code=401, detail="Neplatné přihlašovací údaje")
-    if not instructor.get("pin"):
-        raise HTTPException(status_code=401, detail="Instruktor nemá nastavený PIN")
-    if instructor["pin"] != data.pin:
-        raise HTTPException(status_code=401, detail="Neplatný PIN")
 
+    clear_login_attempts(request, f"instr:{data.instructor_id}")
     access = create_access_token(instructor["instructor_id"], "instructor")
     refresh = create_refresh_token(instructor["instructor_id"])
     _set_auth_cookies(response, access, refresh)
+    logger.info("Přihlášen instruktor %s", instructor["instructor_id"])
 
     return {
         "user_id": instructor["instructor_id"],
@@ -741,9 +963,7 @@ async def logout(request: Request, response: Response):
     if session_token:
         await db.user_sessions.delete_many({"session_token": session_token})
 
-    response.delete_cookie(key="session_token", path="/")
-    response.delete_cookie(key="access_token", path="/")
-    response.delete_cookie(key="refresh_token", path="/")
+    _clear_auth_cookies(response)
     return {"message": "Odhlášeno"}
 
 
@@ -768,7 +988,7 @@ async def refresh_token(request: Request, response: Response):
             role = "instructor" if instr else "admin"
 
         access = create_access_token(user_id, role)
-        response.set_cookie(key="access_token", value=access, httponly=True, secure=True, samesite="none", max_age=43200, path="/")
+        response.set_cookie(key="access_token", value=access, **_cookie_kwargs(ACCESS_TOKEN_MAX_AGE))
         return {"message": "Token obnoven"}
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Refresh token vypršel")
@@ -896,14 +1116,20 @@ async def get_vehicle_by_qr(qr_code: str):
 
 # ======================== INSTRUCTOR ROUTES ========================
 
+def _instructor_response(doc: dict) -> dict:
+    """Shape an instructor document for the API, dropping the PIN."""
+    out = {k: v for k, v in doc.items() if k not in ("pin", "_id")}
+    out["has_pin"] = bool(doc.get("pin"))
+    parse_datetime_field(out, "created_at")
+    parse_datetime_field(out, "updated_at")
+    return out
+
+
 @api_router.get("/instructors", response_model=List[Instructor])
 async def get_instructors(user: User = Depends(get_current_user)):
     """Get all instructors"""
     instructors = await db.instructors.find({}, {"_id": 0}).to_list(1000)
-    for i in instructors:
-        parse_datetime_field(i, "created_at")
-        parse_datetime_field(i, "updated_at")
-    return instructors
+    return [_instructor_response(i) for i in instructors]
 
 @api_router.get("/instructors/{instructor_id}", response_model=Instructor)
 async def get_instructor(instructor_id: str, user: User = Depends(get_current_user)):
@@ -911,50 +1137,54 @@ async def get_instructor(instructor_id: str, user: User = Depends(get_current_us
     instructor = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
     if not instructor:
         raise HTTPException(status_code=404, detail="Instruktor nenalezen")
-    parse_datetime_field(instructor, "created_at")
-    parse_datetime_field(instructor, "updated_at")
-    return Instructor(**instructor)
+    return Instructor(**_instructor_response(instructor))
 
 @api_router.post("/instructors", response_model=Instructor)
 async def create_instructor(data: InstructorCreate, user: User = Depends(get_admin_user)):
     """Create a new instructor"""
     instructor_id = f"inst_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
-    
+
+    payload = data.model_dump()
+    pin = payload.pop("pin", None)
     instructor = {
         "instructor_id": instructor_id,
-        **data.model_dump(),
+        **payload,
+        "pin": hash_password(pin) if pin else None,
         "created_at": now.isoformat(),
         "updated_at": now.isoformat()
     }
-    
-    await db.instructors.insert_one(instructor)
+
+    await db.instructors.insert_one(dict(instructor))
     instructor['created_at'] = now
     instructor['updated_at'] = now
-    return Instructor(**instructor)
+    return Instructor(**_instructor_response(instructor))
 
 @api_router.put("/instructors/{instructor_id}", response_model=Instructor)
 async def update_instructor(instructor_id: str, data: InstructorCreate, user: User = Depends(get_admin_user)):
-    """Update an instructor"""
+    """Update an instructor.
+
+    An empty PIN field means "leave the current PIN alone" — the form never
+    receives the stored PIN back, so submitting it must not wipe the login.
+    """
     instructor = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
     if not instructor:
         raise HTTPException(status_code=404, detail="Instruktor nenalezen")
-    
+
     now = datetime.now(timezone.utc)
-    update_data = {
-        **data.model_dump(),
-        "updated_at": now.isoformat()
-    }
-    
+    payload = data.model_dump()
+    pin = payload.pop("pin", None)
+    update_data = {**payload, "updated_at": now.isoformat()}
+    if pin:
+        update_data["pin"] = hash_password(pin)
+
     await db.instructors.update_one(
         {"instructor_id": instructor_id},
         {"$set": update_data}
     )
-    
+
     updated = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
-    parse_datetime_field(updated, "created_at")
-    updated['updated_at'] = now
-    return Instructor(**updated)
+    return Instructor(**_instructor_response(updated))
 
 @api_router.delete("/instructors/{instructor_id}")
 async def delete_instructor(instructor_id: str, user: User = Depends(get_admin_user)):
@@ -972,6 +1202,7 @@ async def get_logbook_entries(
     instructor_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    limit: int = Query(1000, ge=1, le=20000),
     user: User = Depends(get_current_user)
 ):
     """Get logbook entries with optional filters"""
@@ -987,13 +1218,12 @@ async def get_logbook_entries(
         if date_to:
             query["date"]["$lte"] = date_to
     
-    entries = await db.logbook.find(query, {"_id": 0}).sort("date", -1).to_list(1000)
-    
+    entries = await db.logbook.find(query, {"_id": 0}).sort("date", -1).to_list(limit)
+
     for entry in entries:
         parse_datetime_field(entry, "created_at")
-        await enrich_vehicle_info(entry)
-        await enrich_instructor_name(entry)
-    
+    await enrich_many(entries, with_instructor=True)
+
     return entries
 
 @api_router.post("/logbook", response_model=LogbookEntry)
@@ -1056,11 +1286,11 @@ async def get_fuel_entries(
             query["date"]["$lte"] = date_to
     
     entries = await db.fuel_entries.find(query, {"_id": 0}).sort("date", -1).to_list(1000)
-    
+
     for entry in entries:
         parse_datetime_field(entry, "created_at")
-        await enrich_vehicle_info(entry)
-    
+    await enrich_many(entries)
+
     return entries
 
 @api_router.post("/fuel", response_model=FuelEntry)
@@ -1135,8 +1365,8 @@ async def get_damage_reports(
     for report in reports:
         parse_datetime_field(report, "created_at")
         parse_datetime_field(report, "resolved_at")
-        await enrich_vehicle_info(report)
-    
+    await enrich_many(reports)
+
     return reports
 
 @api_router.post("/damages", response_model=DamageReport)
@@ -1227,9 +1457,8 @@ async def get_handover_protocols(
     
     for protocol in protocols:
         parse_datetime_field(protocol, "created_at")
-        await enrich_vehicle_info(protocol)
-        await enrich_instructor_name(protocol)
-    
+    await enrich_many(protocols, with_instructor=True)
+
     return protocols
 
 @api_router.post("/handovers", response_model=HandoverProtocol)
@@ -1272,11 +1501,11 @@ async def get_qr_handovers(
         query["vehicle_id"] = vehicle_id
     
     handovers = await db.qr_handovers.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    
+
     for h in handovers:
         parse_datetime_field(h, "created_at")
-        await enrich_vehicle_info(h)
-    
+    await enrich_many(handovers)
+
     return handovers
 
 @api_router.get("/qr-handovers/{qr_handover_id}")
@@ -1359,22 +1588,95 @@ async def get_gps_trips(
     vehicle_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    source: Optional[str] = None,
+    include_duplicates: bool = False,
+    include_route: bool = False,
+    limit: int = Query(1000, ge=1, le=20000),
     user: User = Depends(get_current_user)
 ):
-    """Get GPS trips with optional filters"""
-    query = {}
-    if vehicle_id:
-        query["vehicle_id"] = vehicle_id
-    
-    trips = await db.gps_trips.find(query, {"_id": 0}).sort("start_time", -1).to_list(1000)
-    
-    for trip in trips:
-        parse_datetime_field(trip, "start_time")
-        parse_datetime_field(trip, "end_time")
-        parse_datetime_field(trip, "created_at")
-        await enrich_vehicle_info(trip)
-    
-    return trips
+    """GPS trips with optional filters.
+
+    `date_from`/`date_to` used to be accepted and then ignored, so every client
+    received the full history no matter what period it asked for. They now
+    filter on the local calendar date, like every other report.
+
+    Route points are omitted unless `include_route=true`; a long history of
+    trips otherwise transfers megabytes of coordinates the list view never
+    shows.
+    """
+    trip_list = await trips_service.get_trips(
+        db,
+        vehicle_id=vehicle_id,
+        date_from=date_from,
+        date_to=date_to,
+        sources=_parse_source_filter(source),
+        include_duplicates=include_duplicates,
+        include_manual=False,
+        limit=limit,
+    )
+    await trips_service.resolve_trip_instructors(db, trip_list)
+
+    trip_ids = [t["trip_id"] for t in trip_list]
+    routes = {}
+    if include_route and trip_ids:
+        docs = await db.gps_trips.find(
+            {"trip_id": {"$in": trip_ids}}, {"_id": 0, "trip_id": 1, "route_points": 1}
+        ).to_list(len(trip_ids) + 10)
+        routes = {d["trip_id"]: d.get("route_points", []) for d in docs}
+
+    result = []
+    for trip in sorted(trip_list, key=lambda t: t["start_time"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+        result.append({
+            "trip_id": trip["trip_id"],
+            "vehicle_id": trip["vehicle_id"],
+            "vehicle_info": trip.get("vehicle_info"),
+            "source": trip["source"],
+            "start_time": trip["start_time"],
+            "end_time": trip["end_time"],
+            "start_location": trip["start_location"],
+            "end_location": trip["end_location"],
+            "route_points": routes.get(trip["trip_id"], []),
+            "distance": trip["distance_m"],
+            "max_speed": trip["max_speed"],
+            "avg_speed": trip["avg_speed"],
+            "synced_to_logbook": trip["synced_to_logbook"],
+            "duplicate_of": trip.get("duplicate_of"),
+            "created_at": trip["start_time"] or datetime.now(timezone.utc),
+        })
+    return result
+
+
+@api_router.get("/gps/trips/{trip_id}/route")
+async def get_gps_trip_route(
+    trip_id: str,
+    max_points: int = Query(2000, ge=2, le=50000),
+    user: User = Depends(get_current_user),
+):
+    """Route of a single trip, down-sampled for map display.
+
+    Down-sampling only affects what is sent to the browser — the stored GPS
+    history is never modified or trimmed.
+    """
+    trip = await db.gps_trips.find_one({"trip_id": trip_id}, {"_id": 0})
+    if not trip:
+        raise HTTPException(status_code=404, detail="GPS záznam nenalezen")
+
+    points = trip.get("route_points") or []
+    total = len(points)
+    if total > max_points:
+        step = total / float(max_points)
+        sampled = [points[int(i * step)] for i in range(max_points)]
+        if sampled[-1] is not points[-1]:
+            sampled[-1] = points[-1]
+        points = sampled
+
+    return {
+        "trip_id": trip_id,
+        "source": trips_service.trip_source(trip),
+        "points": points,
+        "total_points": total,
+        "downsampled": total > len(points),
+    }
 
 # Sample Czech locations for driving school
 _MOCK_LOCATIONS = [
@@ -1414,6 +1716,8 @@ def _generate_mock_trip(vehicle_id: str, trip_date: datetime, trip_num: int, now
     return {
         "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
         "vehicle_id": vehicle_id,
+        # Tagged as mock so reports never mix demo kilometres with real ones.
+        "source": trips_service.SOURCE_MOCK,
         "start_time": start_time.isoformat(),
         "end_time": end_time.isoformat(),
         "start_location": start_loc,
@@ -1423,13 +1727,28 @@ def _generate_mock_trip(vehicle_id: str, trip_date: datetime, trip_num: int, now
         "max_speed": secrets.randbelow(31) + 50,
         "avg_speed": secrets.randbelow(21) + 25,
         "synced_to_logbook": False,
+        "duplicate_of": None,
         "created_at": now.isoformat()
     }
 
 
+def _require_mock_data_enabled():
+    """Mock generators write into the same collections as real tracker data.
+
+    They stay disabled unless ALLOW_MOCK_DATA is set, so a demo button cannot
+    inject fabricated kilometres into a production logbook.
+    """
+    if not settings.allow_mock_data:
+        raise HTTPException(
+            status_code=403,
+            detail="Generování ukázkových dat je v tomto prostředí vypnuté (ALLOW_MOCK_DATA).",
+        )
+
+
 @api_router.post("/gps/import-mock")
-async def import_mock_gps_data(vehicle_id: str, user: User = Depends(get_current_user)):
-    """Generate mock GPS data for a vehicle (simulating Teltonika FMB003 import)"""
+async def import_mock_gps_data(vehicle_id: str, user: User = Depends(get_admin_user)):
+    """Generate mock GPS data for a vehicle (development aid, disabled in production)."""
+    _require_mock_data_enabled()
     vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
@@ -1464,6 +1783,11 @@ async def sync_trip_to_logbook(trip_id: str, user: User = Depends(get_current_us
         raise HTTPException(status_code=404, detail="GPS záznam nenalezen")
     if trip.get("synced_to_logbook"):
         raise HTTPException(status_code=400, detail="Záznam již byl synchronizován")
+    if trip.get("duplicate_of"):
+        raise HTTPException(
+            status_code=400,
+            detail="Tato jízda je označena jako duplicita již zaznamenané jízdy a nelze ji zapsat do knihy jízd.",
+        )
 
     vehicle = await db.vehicles.find_one({"vehicle_id": trip["vehicle_id"]}, {"_id": 0})
     if not vehicle:
@@ -1471,26 +1795,39 @@ async def sync_trip_to_logbook(trip_id: str, user: User = Depends(get_current_us
 
     start_time, end_time = _parse_trip_times(trip)
     now = datetime.now(timezone.utc)
-    distance_km = trip["distance"] // 1000
-    start_odometer = vehicle["odometer"]
+    # Round rather than truncate: flooring dropped up to a kilometre per trip
+    # from the odometer on every sync.
+    distance_km = int(round((trip.get("distance") or 0) / 1000))
+    start_odometer = vehicle.get("odometer", 0)
     end_odometer = start_odometer + distance_km
+
+    source = trips_service.trip_source(trip)
+    local_start = start_time.astimezone(trips_service.REPORT_TZ) if start_time.tzinfo else start_time
+    local_end = end_time.astimezone(trips_service.REPORT_TZ) if end_time.tzinfo else end_time
+    start_address = (trip.get("start_location") or {}).get("address") or "GPS"
+    end_address = (trip.get("end_location") or {}).get("address") or "GPS"
 
     logbook_entry = {
         "entry_id": f"log_{uuid.uuid4().hex[:12]}",
         "vehicle_id": trip["vehicle_id"],
         "instructor_id": vehicle.get("assigned_instructor_id"),
-        "date": start_time.strftime("%Y-%m-%d"),
-        "start_time": start_time.strftime("%H:%M"),
-        "end_time": end_time.strftime("%H:%M"),
-        "start_location": trip["start_location"]["address"],
-        "end_location": trip["end_location"]["address"],
-        "route_description": f"{trip['start_location']['address']} → {trip['end_location']['address']}",
+        "date": local_start.strftime("%Y-%m-%d"),
+        "start_time": local_start.strftime("%H:%M"),
+        "end_time": local_end.strftime("%H:%M"),
+        "start_location": start_address,
+        "end_location": end_address,
+        "route_description": f"{start_address} → {end_address}",
         "start_odometer": start_odometer,
         "end_odometer": end_odometer,
         "distance": distance_km,
         "purpose": "výcvik",
-        "notes": f"Import z GPS (max. rychlost: {trip['max_speed']} km/h, prům. rychlost: {trip['avg_speed']} km/h)",
+        "notes": f"Import z {source} (max. rychlost: {trip.get('max_speed', 0)} km/h, "
+                 f"prům. rychlost: {trip.get('avg_speed', 0)} km/h)",
+        # Marks this row as a projection of a trip, so reports count the trip
+        # itself and not both. `source_trip_id` keeps the link explicit.
         "gps_source": True,
+        "source": source,
+        "source_trip_id": trip_id,
         "created_at": now.isoformat()
     }
 
@@ -1505,98 +1842,279 @@ async def sync_trip_to_logbook(trip_id: str, user: User = Depends(get_current_us
 
 # ======================== REPORTS & ANALYTICS ========================
 
+def _parse_source_filter(source: Optional[str]) -> Optional[List[str]]:
+    """Turn a `source=` query parameter into a list of trip sources.
+
+    Reports include every real source by default. Filtering by source is
+    possible but never the default, so a drive imported from Ruhavik counts
+    exactly like one recorded by a tracker.
+    """
+    if not source or source.strip().lower() in ("", "all", "vse", "vše"):
+        return None
+    requested = [part.strip().lower() for part in source.split(",") if part.strip()]
+    unknown = [part for part in requested if part not in trips_service.ALL_SOURCES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Neznámý zdroj jízd: {', '.join(unknown)}. "
+                   f"Povolené hodnoty: {', '.join(trips_service.ALL_SOURCES)}.",
+        )
+    return requested
+
+
+async def _load_report_trips(
+    vehicle_id: Optional[str] = None,
+    instructor_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    source: Optional[str] = None,
+    include_duplicates: bool = False,
+) -> List[dict]:
+    """Fetch trips for a report, enriched with vehicle and instructor names.
+
+    Single entry point for every report so the same period can never produce a
+    different number of trips on two different screens.
+    """
+    trip_list = await trips_service.get_trips(
+        db,
+        vehicle_id=vehicle_id,
+        date_from=date_from,
+        date_to=date_to,
+        sources=_parse_source_filter(source),
+        include_duplicates=include_duplicates,
+    )
+    await trips_service.resolve_trip_instructors(db, trip_list)
+    if instructor_id:
+        trip_list = [t for t in trip_list if t.get("instructor_id") == instructor_id]
+    return trip_list
+
+
+def _serialize_trip(trip: dict) -> dict:
+    """JSON-safe view of a normalised trip."""
+    out = dict(trip)
+    for field in ("start_time", "end_time"):
+        value = out.get(field)
+        out[field] = value.isoformat() if isinstance(value, datetime) else value
+    return out
+
+
 @api_router.get("/reports/dashboard")
 async def get_dashboard_stats(user: User = Depends(get_current_user)):
-    """Get dashboard statistics"""
+    """Dashboard statistics.
+
+    Trip figures come from the unified trip layer, so tracker-recorded,
+    Ruhavik-imported and hand-written drives are all counted.
+    """
     now = datetime.now(timezone.utc)
-    
-    # Total vehicles
+    month_start = now.astimezone(trips_service.REPORT_TZ).replace(day=1).date().isoformat()
+    week_ago = (now - timedelta(days=7)).astimezone(trips_service.REPORT_TZ).date().isoformat()
+    today = now.astimezone(trips_service.REPORT_TZ).date().isoformat()
+
     total_vehicles = await db.vehicles.count_documents({})
-    
-    # Total instructors
     total_instructors = await db.instructors.count_documents({})
-    
-    # Total km this month
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    logbook_entries = await db.logbook.find({
-        "date": {"$gte": month_start.strftime("%Y-%m-%d")}
-    }, {"_id": 0, "distance": 1}).to_list(1000)
-    total_km_month = sum(entry.get("distance", 0) for entry in logbook_entries)
-    
-    # Total fuel cost this month
-    fuel_entries = await db.fuel_entries.find({
-        "date": {"$gte": month_start.strftime("%Y-%m-%d")}
-    }, {"_id": 0, "total_price": 1}).to_list(1000)
-    total_fuel_cost_month = sum(entry.get("total_price", 0) for entry in fuel_entries)
-    
-    # Open damage reports
+
+    month_trips = await _load_report_trips(date_from=month_start, date_to=today)
+    month_summary = trips_service.summarize(month_trips)
+    recent_trips = sum(1 for t in month_trips if t["date"] and t["date"] >= week_ago)
+
+    fuel_entries = await db.fuel_entries.find(
+        {"date": {"$gte": month_start}}, {"_id": 0, "total_price": 1}
+    ).to_list(10000)
+    total_fuel_cost_month = sum(entry.get("total_price", 0) or 0 for entry in fuel_entries)
+
     open_damages = await db.damage_reports.count_documents({"status": {"$ne": "vyřešeno"}})
-    
-    # Recent trips (last 7 days)
-    week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-    recent_trips = await db.logbook.count_documents({"date": {"$gte": week_ago}})
-    
-    # Vehicles list with current status
-    vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(100)
-    
+    vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(1000)
+
     return {
         "total_vehicles": total_vehicles,
         "total_instructors": total_instructors,
-        "total_km_month": total_km_month,
+        "total_km_month": round(month_summary["total_distance_km"]),
         "total_fuel_cost_month": round(total_fuel_cost_month, 2),
         "open_damages": open_damages,
         "recent_trips": recent_trips,
-        "vehicles": vehicles
+        "trips_month": month_summary["total_trips"],
+        "km_month_by_source": month_summary["by_source"],
+        "vehicles": vehicles,
     }
+
 
 @api_router.get("/reports/km-stats")
 async def get_km_statistics(
     date_from: str,
     date_to: str,
     vehicle_id: Optional[str] = None,
+    instructor_id: Optional[str] = None,
+    source: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get kilometer statistics for a date range"""
-    query = {
-        "date": {"$gte": date_from, "$lte": date_to}
+    """Kilometre statistics for a period, across every trip source."""
+    trip_list = await _load_report_trips(
+        vehicle_id=vehicle_id,
+        instructor_id=instructor_id,
+        date_from=date_from,
+        date_to=date_to,
+        source=source,
+    )
+    summary = trips_service.summarize(trip_list)
+
+    # `vehicle_stats` keeps its historical keyed-object shape for the existing
+    # frontend; `by_source` is additive.
+    vehicle_stats = {
+        bucket["vehicle_id"]: {
+            "total_km": bucket["distance_km"],
+            "trips": bucket["trips"],
+            "name": bucket.get("vehicle_info"),
+            "sources": bucket.get("sources", {}),
+        }
+        for bucket in summary["by_vehicle"]
     }
-    if vehicle_id:
-        query["vehicle_id"] = vehicle_id
-    
-    entries = await db.logbook.find(query, {"_id": 0}).to_list(10000)
-    
-    # Group by date
-    daily_stats = {}
-    vehicle_stats = {}
-    
-    for entry in entries:
-        date = entry["date"]
-        distance = entry.get("distance", 0)
-        vid = entry["vehicle_id"]
-        
-        if date not in daily_stats:
-            daily_stats[date] = 0
-        daily_stats[date] += distance
-        
-        if vid not in vehicle_stats:
-            vehicle_stats[vid] = {"total_km": 0, "trips": 0}
-        vehicle_stats[vid]["total_km"] += distance
-        vehicle_stats[vid]["trips"] += 1
-    
-    # Enrich vehicle stats with names
-    for vid in vehicle_stats:
-        vehicle = await db.vehicles.find_one({"vehicle_id": vid}, {"_id": 0})
-        if vehicle:
-            vehicle_stats[vid]["name"] = f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})"
-    
-    total_km = sum(daily_stats.values())
-    num_days = len(daily_stats) if daily_stats else 1
-    
+
     return {
-        "total_km": total_km,
-        "avg_km_per_day": round(total_km / num_days, 1),
-        "daily_stats": [{"date": k, "km": v} for k, v in sorted(daily_stats.items())],
-        "vehicle_stats": vehicle_stats
+        "total_km": summary["total_distance_km"],
+        "total_trips": summary["total_trips"],
+        "avg_km_per_day": summary["avg_km_per_day"],
+        "daily_stats": [{"date": d["date"], "km": d["km"]} for d in summary["daily"]],
+        "vehicle_stats": vehicle_stats,
+        "by_source": summary["by_source"],
+        "instructor_stats": summary["by_instructor"],
+    }
+
+
+@api_router.get("/reports/trips")
+async def get_trip_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    vehicle_id: Optional[str] = None,
+    instructor_id: Optional[str] = None,
+    source: Optional[str] = None,
+    include_duplicates: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Unified trip report: every drive from every source, plus totals."""
+    trip_list = await _load_report_trips(
+        vehicle_id=vehicle_id,
+        instructor_id=instructor_id,
+        date_from=date_from,
+        date_to=date_to,
+        source=source,
+        include_duplicates=include_duplicates,
+    )
+    return {
+        "trips": [_serialize_trip(t) for t in trip_list],
+        "summary": trips_service.summarize(trip_list),
+        "filters": {
+            "date_from": date_from, "date_to": date_to, "vehicle_id": vehicle_id,
+            "instructor_id": instructor_id, "source": source,
+            "include_duplicates": include_duplicates,
+        },
+    }
+
+
+@api_router.get("/reports/trips/export-csv")
+async def export_trip_report_csv(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    vehicle_id: Optional[str] = None,
+    instructor_id: Optional[str] = None,
+    source: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """CSV export of the unified trip report (semicolon separated, UTF-8 BOM)."""
+    trip_list = await _load_report_trips(
+        vehicle_id=vehicle_id, instructor_id=instructor_id,
+        date_from=date_from, date_to=date_to, source=source,
+    )
+
+    buffer = io.StringIO()
+    writer = csv_module.writer(buffer, delimiter=";", lineterminator="\n")
+    writer.writerow([
+        "Datum", "Zacatek", "Konec", "Vozidlo", "Ucitel", "Odkud", "Kam",
+        "Vzdalenost (km)", "Doba (min)", "Max. rychlost", "Zdroj",
+    ])
+    for trip in trip_list:
+        start = trip.get("start_time")
+        end = trip.get("end_time")
+        writer.writerow([
+            trip.get("date") or "",
+            start.astimezone(trips_service.REPORT_TZ).strftime("%H:%M") if start else "",
+            end.astimezone(trips_service.REPORT_TZ).strftime("%H:%M") if end else "",
+            trip.get("vehicle_info") or trip.get("vehicle_id") or "",
+            trip.get("instructor_name") or "",
+            trip.get("start_address") or "",
+            trip.get("end_address") or "",
+            f"{trip.get('distance_km', 0):.2f}".replace(".", ","),
+            trip.get("duration_min") or 0,
+            trip.get("max_speed") or 0,
+            trip.get("source") or "",
+        ])
+
+    summary = trips_service.summarize(trip_list)
+    writer.writerow([])
+    writer.writerow(["Celkem jizd", summary["total_trips"]])
+    writer.writerow(["Celkem km", f"{summary['total_distance_km']:.1f}".replace(".", ",")])
+    for src, bucket in sorted(summary["by_source"].items()):
+        writer.writerow([f"  z toho {src}", bucket["trips"], f"{bucket['distance_km']:.1f}".replace(".", ",")])
+
+    payload = "\ufeff" + buffer.getvalue()
+    filename = f"jizdy-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.csv"
+    return StreamingResponse(
+        io.BytesIO(payload.encode("utf-8")),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.get("/reports/vehicle/{vehicle_id}")
+async def get_vehicle_report(
+    vehicle_id: str,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    source: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """Per-vehicle statistics across every trip source."""
+    vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+
+    trip_list = await _load_report_trips(
+        vehicle_id=vehicle_id, date_from=date_from, date_to=date_to, source=source
+    )
+    summary = trips_service.summarize(trip_list)
+    return {
+        "vehicle_id": vehicle_id,
+        "vehicle_info": f"{vehicle['brand']} {vehicle['model']} ({vehicle['registration_plate']})",
+        "odometer": vehicle.get("odometer", 0),
+        "summary": summary,
+        "trips": [_serialize_trip(t) for t in trip_list],
+    }
+
+
+@api_router.get("/reports/instructor/{instructor_id}")
+async def get_instructor_report(
+    instructor_id: str,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    source: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """Per-instructor statistics.
+
+    GPS and Ruhavik drives have no instructor of their own, so they are
+    attributed through the instructor assigned to the vehicle.
+    """
+    instructor = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instruktor nenalezen")
+
+    trip_list = await _load_report_trips(
+        instructor_id=instructor_id, date_from=date_from, date_to=date_to, source=source
+    )
+    return {
+        "instructor_id": instructor_id,
+        "instructor_name": instructor.get("name"),
+        "summary": trips_service.summarize(trip_list),
+        "trips": [_serialize_trip(t) for t in trip_list],
     }
 
 
@@ -1714,7 +2232,7 @@ def _build_logbook_pdf(entries: list, date_from: str, date_to: str) -> io.BytesI
     for e in entries:
         distance = e.get("distance", 0)
         total_km += distance
-        source = "GPS" if e.get("gps_source") else "Man."
+        source = e.get("source_label") or ("GPS" if e.get("gps_source") else "Man.")
         row = [
             Paragraph(e.get("date", ""), cell_style),
             Paragraph(f"{e.get('start_time', '')}-{e.get('end_time', '')}", cell_style),
@@ -1766,32 +2284,78 @@ def _build_logbook_pdf(entries: list, date_from: str, date_to: str) -> io.BytesI
     return buf
 
 
+_SOURCE_LABELS = {
+    trips_service.SOURCE_TELTONIKA: "GPS",
+    trips_service.SOURCE_RUHAVIK: "Ruhavik",
+    trips_service.SOURCE_MANUAL: "Man.",
+    trips_service.SOURCE_MOCK: "Demo",
+}
+
+
+def _trip_as_logbook_row(trip: dict) -> dict:
+    """Render a normalised trip in the shape the logbook PDF builder expects."""
+    start = trip.get("start_time")
+    end = trip.get("end_time")
+    return {
+        "date": trip.get("date") or "",
+        "start_time": start.astimezone(trips_service.REPORT_TZ).strftime("%H:%M") if start else "",
+        "end_time": end.astimezone(trips_service.REPORT_TZ).strftime("%H:%M") if end else "",
+        "vehicle_info": trip.get("vehicle_info") or trip.get("vehicle_id") or "",
+        "instructor_name": trip.get("instructor_name") or "-",
+        "start_location": trip.get("start_address") or "",
+        "end_location": trip.get("end_address") or "",
+        "start_odometer": "",
+        "end_odometer": "",
+        "distance": round(trip.get("distance_km") or 0),
+        "purpose": trip.get("purpose") or "",
+        "source_label": _SOURCE_LABELS.get(trip.get("source"), trip.get("source") or "?"),
+    }
+
+
 @api_router.get("/logbook/export-pdf")
 async def export_logbook_pdf(
     vehicle_id: Optional[str] = None,
     instructor_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    source: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Export logbook entries as a PDF file"""
-    query = {}
-    if vehicle_id:
-        query["vehicle_id"] = vehicle_id
-    if instructor_id:
-        query["instructor_id"] = instructor_id
-    if date_from or date_to:
-        query["date"] = {}
-        if date_from:
-            query["date"]["$gte"] = date_from
-        if date_to:
-            query["date"]["$lte"] = date_to
+    """Export the logbook as a PDF.
 
-    entries = await db.logbook.find(query, {"_id": 0}).sort("date", 1).to_list(10000)
+    The export is built from the unified trip layer, so a drive imported from
+    Ruhavik appears in the printed logbook exactly like one recorded by a
+    tracker or entered by hand — the `Zdroj` column says which is which.
+    """
+    trip_list = await _load_report_trips(
+        vehicle_id=vehicle_id,
+        instructor_id=instructor_id,
+        date_from=date_from,
+        date_to=date_to,
+        source=source,
+    )
+    entries = [_trip_as_logbook_row(t) for t in trip_list]
 
-    for entry in entries:
-        await enrich_vehicle_info(entry)
-        await enrich_instructor_name(entry)
+    # Manual entries keep their odometer readings, which the normalised view
+    # does not carry; fill them back in for the rows that have them.
+    manual_ids = [t["trip_id"] for t in trip_list if t["source"] == trips_service.SOURCE_MANUAL]
+    if manual_ids:
+        raw = await db.logbook.find(
+            {"entry_id": {"$in": manual_ids}},
+            {"_id": 0, "entry_id": 1, "start_odometer": 1, "end_odometer": 1},
+        ).to_list(len(manual_ids) + 10)
+        odometers = {r["entry_id"]: r for r in raw}
+        for trip, row in zip(trip_list, entries):
+            reading = odometers.get(trip["trip_id"])
+            if reading:
+                row["start_odometer"] = reading.get("start_odometer", "")
+                row["end_odometer"] = reading.get("end_odometer", "")
+
+    logger.info(
+        "PDF knihy jízd: %d jízd (%s)",
+        len(entries),
+        ", ".join(f"{k}={v['trips']}" for k, v in trips_service.summarize(trip_list)["by_source"].items()) or "žádné",
+    )
 
     pdf_buf = _build_logbook_pdf(entries, date_from, date_to)
     filename = f"kniha-jizd-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.pdf"
@@ -1808,12 +2372,16 @@ async def export_logbook_pdf(
 @api_router.get("/gps/live-positions")
 async def get_live_positions(user: User = Depends(get_current_user)):
     """Get latest simulated position for all vehicles."""
-    vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(100)
+    vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(1000)
     positions = []
 
+    # One indexed lookup per vehicle; the projection keeps route history out of
+    # the response entirely.
     for v in vehicles:
         pos = await db.vehicle_positions.find_one(
-            {"vehicle_id": v["vehicle_id"]}, {"_id": 0}, sort=[("timestamp", -1)]
+            {"vehicle_id": v["vehicle_id"]},
+            {"_id": 0, "lat": 1, "lng": 1, "speed": 1, "heading": 1, "ignition": 1, "timestamp": 1},
+            sort=[("timestamp", -1)],
         )
         if pos:
             parse_datetime_field(pos, "timestamp")
@@ -1843,8 +2411,9 @@ async def get_live_positions(user: User = Depends(get_current_user)):
 
 
 @api_router.post("/gps/simulate-live")
-async def simulate_live_positions(user: User = Depends(get_current_user)):
-    """Generate simulated live position updates for all vehicles (mock real-time)."""
+async def simulate_live_positions(user: User = Depends(get_admin_user)):
+    """Generate simulated live position updates (development aid, disabled in production)."""
+    _require_mock_data_enabled()
     vehicles = await db.vehicles.find({}, {"_id": 0}).to_list(100)
     now = datetime.now(timezone.utc)
     updated = 0
@@ -1872,6 +2441,7 @@ async def simulate_live_positions(user: User = Depends(get_current_user)):
             "speed": speed,
             "heading": heading,
             "ignition": ignition,
+            "source": trips_service.SOURCE_MOCK,
             "timestamp": now.isoformat()
         })
         updated += 1
@@ -1902,67 +2472,124 @@ teltonika_server = None
 
 
 async def on_teltonika_records(imei: str, records: list):
-    """Callback invoked by the TCP server when AVL records arrive."""
+    """Persist AVL records received from a tracker.
+
+    Runs on the TCP server's event loop, so it must stay cheap: positions are
+    written with one bulk insert instead of one round trip per record.
+    Duplicate positions (a tracker resends everything it did not get an ACK
+    for) are rejected by the unique `imei + timestamp` index rather than
+    silently doubling the vehicle's mileage.
+    """
     device = await db.gps_devices.find_one({"imei": imei}, {"_id": 0})
     if not device:
-        logger.warning("Unknown IMEI: %s — data discarded", imei)
+        logger.warning(
+            "Neznámé IMEI %s — %d záznamů zahozeno. Zaregistrujte zařízení v Nastavení trackeru.",
+            imei, len(records),
+        )
         return
 
     vehicle_id = device["vehicle_id"]
     now = datetime.now(timezone.utc)
 
+    position_docs = []
+    latest_obd = None
+    skipped_no_fix = 0
+
     for rec in records:
-        gps = rec["gps"]
-        if gps["lat"] == 0.0 and gps["lng"] == 0.0:
-            continue  # skip invalid GPS fix
+        gps = rec.get("gps") or {}
+        lat, lng = gps.get("lat"), gps.get("lng")
 
-        obd = rec.get("obd", {})
+        # A tracker without a fix reports 0/0 with zero satellites; storing it
+        # would drag every route to the Gulf of Guinea.
+        if lat is None or lng is None or (lat == 0.0 and lng == 0.0) or gps.get("satellites", 0) == 0:
+            skipped_no_fix += 1
+            continue
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+            skipped_no_fix += 1
+            continue
 
-        position_doc = {
+        obd = rec.get("obd") or {}
+        speed = gps.get("speed", 0)
+        doc = {
             "vehicle_id": vehicle_id,
-            "lat": gps["lat"],
-            "lng": gps["lng"],
-            "speed": gps["speed"],
-            "heading": gps["angle"],
+            "lat": lat,
+            "lng": lng,
+            "speed": speed,
+            "heading": gps.get("angle", 0),
             "altitude": gps.get("altitude", 0),
             "satellites": gps.get("satellites", 0),
-            "ignition": obd.get("ignition", {}).get("value", gps["speed"] > 0),
-            "source": "teltonika",
+            "ignition": bool(obd.get("ignition", {}).get("value", speed > 0)),
+            "source": trips_service.SOURCE_TELTONIKA,
             "imei": imei,
             "timestamp": rec["timestamp"].isoformat(),
         }
-
-        # Add OBD data if present
         if obd:
-            position_doc["obd"] = {k: v["value"] for k, v in obd.items()}
+            doc["obd"] = {k: v["value"] for k, v in obd.items()}
+            latest_obd = (rec["timestamp"], obd)
+        position_docs.append(doc)
 
-        await db.vehicle_positions.insert_one(position_doc)
+    inserted = 0
+    duplicates = 0
+    if position_docs:
+        try:
+            result = await db.vehicle_positions.insert_many(position_docs, ordered=False)
+            inserted = len(result.inserted_ids)
+        except BulkWriteError as exc:
+            # Duplicate-key errors are expected on a tracker replay; anything
+            # else is a real storage problem and must surface.
+            write_errors = exc.details.get("writeErrors", []) if exc.details else []
+            duplicates = sum(1 for err in write_errors if err.get("code") == 11000)
+            other = [err for err in write_errors if err.get("code") != 11000]
+            inserted = len(position_docs) - len(write_errors)
+            if other:
+                logger.error("Ukládání pozic pro IMEI %s selhalo: %s", imei, other[:3])
+                raise
+        except PyMongoError:
+            logger.exception("Ukládání pozic pro IMEI %s selhalo", imei)
+            raise
 
-        # Store OBD snapshot for diagnostics
-        if obd:
-            await db.vehicle_obd.update_one(
-                {"vehicle_id": vehicle_id},
-                {"$set": {
-                    "vehicle_id": vehicle_id,
-                    "imei": imei,
-                    "data": {k: v for k, v in obd.items()},
-                    "timestamp": rec["timestamp"].isoformat(),
-                    "updated_at": now.isoformat(),
-                }},
-                upsert=True,
-            )
+    if latest_obd:
+        timestamp, obd = latest_obd
+        await db.vehicle_obd.update_one(
+            {"vehicle_id": vehicle_id},
+            {"$set": {
+                "vehicle_id": vehicle_id,
+                "imei": imei,
+                "data": obd,
+                "timestamp": timestamp.isoformat(),
+                "updated_at": now.isoformat(),
+            }},
+            upsert=True,
+        )
 
     await db.gps_devices.update_one(
         {"imei": imei},
         {"$set": {"last_seen": now.isoformat(), "status": "online"}}
     )
 
+    logger.info(
+        "IMEI %s → vozidlo %s: %d pozic uloženo, %d duplicit, %d bez GPS fixu",
+        imei, vehicle_id, inserted, duplicates, skipped_no_fix,
+    )
+
 
 async def start_teltonika_server():
-    """Start the Teltonika TCP server as a background task."""
+    """Start the Teltonika TCP receiver.
+
+    A failure to bind is logged and re-raised by the caller's error handling
+    rather than being swallowed — a silently missing GPS receiver looks exactly
+    like "trackers stopped sending data".
+    """
     global teltonika_server
-    port = int(os.environ.get("TELTONIKA_TCP_PORT", "5027"))
-    teltonika_server = TeltonikaTCPServer(host="0.0.0.0", port=port, on_records=on_teltonika_records)
+    if not settings.teltonika_enabled:
+        logger.warning("Teltonika TCP přijímač je vypnutý (TELTONIKA_ENABLED=false)")
+        return
+    teltonika_server = TeltonikaTCPServer(
+        host=settings.teltonika_host,
+        port=settings.teltonika_port,
+        on_records=on_teltonika_records,
+        idle_timeout=settings.teltonika_idle_timeout,
+    )
     await teltonika_server.start()
 
 
@@ -1971,16 +2598,16 @@ async def start_teltonika_server():
 @api_router.get("/gps/devices")
 async def get_gps_devices(user: User = Depends(get_current_user)):
     """List all registered GPS tracker devices."""
-    devices = await db.gps_devices.find({}, {"_id": 0}).to_list(100)
+    devices = await db.gps_devices.find({}, {"_id": 0}).to_list(500)
     for d in devices:
         parse_datetime_field(d, "created_at")
         parse_datetime_field(d, "last_seen")
-        await enrich_vehicle_info(d)
+    await enrich_many(devices)
     return devices
 
 
 @api_router.post("/gps/devices")
-async def register_gps_device(data: GPSDeviceCreate, user: User = Depends(get_current_user)):
+async def register_gps_device(data: GPSDeviceCreate, user: User = Depends(get_admin_user)):
     """Register a new GPS tracker device (IMEI → vehicle mapping)."""
     existing = await db.gps_devices.find_one({"imei": data.imei}, {"_id": 0})
     if existing:
@@ -2009,7 +2636,7 @@ async def register_gps_device(data: GPSDeviceCreate, user: User = Depends(get_cu
 
 
 @api_router.delete("/gps/devices/{device_id}")
-async def delete_gps_device(device_id: str, user: User = Depends(get_current_user)):
+async def delete_gps_device(device_id: str, user: User = Depends(get_admin_user)):
     """Unregister a GPS tracker device."""
     result = await db.gps_devices.delete_one({"device_id": device_id})
     if result.deleted_count == 0:
@@ -2022,47 +2649,66 @@ async def get_tcp_status(user: User = Depends(get_current_user)):
     """Get Teltonika TCP server status."""
     if teltonika_server:
         return teltonika_server.stats
-    return {"running": False, "host": "0.0.0.0", "port": 5027, "active_connections": 0, "total_records_received": 0}
+    return {
+        "running": False,
+        "enabled": settings.teltonika_enabled,
+        "host": settings.teltonika_host,
+        "port": settings.teltonika_port,
+        "active_connections": 0,
+        "total_records_received": 0,
+    }
 
 
 @api_router.post("/gps/test-teltonika")
 async def test_teltonika_device(
     imei: str,
-    lat: float = 50.0755,
-    lng: float = 14.4378,
-    speed: int = 45,
-    user: User = Depends(get_current_user)
+    lat: float = Query(50.0755, ge=-90, le=90),
+    lng: float = Query(14.4378, ge=-180, le=180),
+    speed: int = Query(45, ge=0, le=400),
+    user: User = Depends(get_admin_user)
 ):
-    """Simulate a Teltonika device sending a single AVL record (for testing without hardware)."""
-    import asyncio as _asyncio
+    """Send one synthetic AVL record to the local TCP receiver.
 
-    port = int(os.environ.get("TELTONIKA_TCP_PORT", "5027"))
+    Diagnostic aid for verifying that a registered IMEI reaches the database
+    without waiting for real hardware. It connects to the receiver on loopback
+    only, and writes a position exactly as a real tracker would — so it stays
+    behind the mock-data flag.
+    """
+    _require_mock_data_enabled()
+    if not (teltonika_server and teltonika_server.is_running):
+        raise HTTPException(status_code=503, detail="Teltonika TCP přijímač neběží")
 
+    writer = None
     try:
-        reader, writer = await _asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", settings.teltonika_port), timeout=5
+        )
 
-        # Send IMEI
         writer.write(build_imei_packet(imei))
         await writer.drain()
-        resp = await reader.read(1)
+        resp = await asyncio.wait_for(reader.readexactly(1), timeout=5)
         if resp != b"\x01":
-            writer.close()
-            return {"success": False, "error": "IMEI rejected"}
+            return {"success": False, "error": "IMEI odmítnuto přijímačem"}
 
-        # Send AVL packet
-        packet = build_test_avl_packet(lat=lat, lng=lng, speed=speed)
-        writer.write(packet)
+        writer.write(build_avl_packet([{"lat": lat, "lng": lng, "speed": speed, "altitude": 200}]))
         await writer.drain()
-        ack = await reader.read(4)
+        ack = await asyncio.wait_for(reader.readexactly(4), timeout=10)
+        ack_count = struct.unpack(">I", ack)[0]
 
-        import struct as _struct
-        ack_count = _struct.unpack(">I", ack)[0] if len(ack) == 4 else 0
-        writer.close()
-
-        return {"success": True, "records_acked": ack_count, "imei": imei, "lat": lat, "lng": lng, "speed": speed}
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {
+            "success": True, "records_acked": ack_count,
+            "imei": imei, "lat": lat, "lng": lng, "speed": speed,
+        }
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+        logger.warning("Testovací Teltonika paket selhal: %s", exc)
+        return {"success": False, "error": str(exc)}
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
 
 
 # ======================== OBD-II DIAGNOSTICS ========================
@@ -2070,11 +2716,11 @@ async def test_teltonika_device(
 @api_router.get("/obd/vehicles")
 async def get_all_obd_data(user: User = Depends(get_current_user)):
     """Get latest OBD-II diagnostic data for all vehicles."""
-    obd_docs = await db.vehicle_obd.find({}, {"_id": 0}).to_list(100)
+    obd_docs = await db.vehicle_obd.find({}, {"_id": 0}).to_list(500)
     for doc in obd_docs:
-        await enrich_vehicle_info(doc)
         parse_datetime_field(doc, "timestamp")
         parse_datetime_field(doc, "updated_at")
+    await enrich_many(obd_docs)
     return obd_docs
 
 
@@ -2107,8 +2753,8 @@ async def get_vehicle_obd_history(
 
 # ======================== AUTO-TRIP DETECTION ========================
 
-def _build_trip_doc(vehicle_id: str, trip_start: dict, trip_points: list) -> dict:
-    """Build a trip document from detected trip start and points."""
+def _build_trip_doc(vehicle_id: str, trip_start: dict, trip_points: list) -> tuple:
+    """Build a trip document from a detected trip. Returns (document, distance_m)."""
     trip_end = trip_points[-1]
     end_ts = trip_end.get("timestamp")
     if isinstance(end_ts, str):
@@ -2126,6 +2772,8 @@ def _build_trip_doc(vehicle_id: str, trip_start: dict, trip_points: list) -> dic
     return {
         "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
         "vehicle_id": vehicle_id,
+        "source": trips_service.SOURCE_TELTONIKA,
+        "duplicate_of": None,
         "start_time": start_time.isoformat() if isinstance(start_time, datetime) else start_time,
         "end_time": end_ts.isoformat() if isinstance(end_ts, datetime) else end_ts,
         "start_location": {"lat": trip_start["lat"], "lng": trip_start["lng"], "address": "GPS"},
@@ -2155,6 +2803,7 @@ async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_
         return {"message": "Nedostatek dat pro detekci jízd", "trips": 0}
 
     trips_created = 0
+    trips_skipped = 0
     trip_start = None
     trip_points = []
 
@@ -2172,12 +2821,25 @@ async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_
         elif not ignition and trip_start is not None and len(trip_points) >= 2:
             trip_doc, distance = _build_trip_doc(vehicle_id, trip_start, trip_points)
             if distance >= 100:
-                await db.gps_trips.insert_one(trip_doc)
-                trips_created += 1
+                # Re-running detection must not multiply the same drive.
+                existing = await trips_service.find_duplicate_trip(db, trip_doc)
+                if existing:
+                    trips_skipped += 1
+                else:
+                    await db.gps_trips.insert_one(trip_doc)
+                    trips_created += 1
             trip_start = None
             trip_points = []
 
-    return {"message": f"Detekováno {trips_created} jízd", "trips": trips_created}
+    logger.info(
+        "Detekce jízd pro vozidlo %s: %d nových, %d již existovalo",
+        vehicle_id, trips_created, trips_skipped,
+    )
+    return {
+        "message": f"Detekováno {trips_created} jízd ({trips_skipped} již existovalo)",
+        "trips": trips_created,
+        "skipped_existing": trips_skipped,
+    }
 
 
 def _haversine(lat1, lng1, lat2, lng2):
@@ -2205,11 +2867,11 @@ async def get_maintenance_items(
     if vehicle_id:
         query["vehicle_id"] = vehicle_id
     items = await db.maintenance.find(query, {"_id": 0}).sort("next_due_date", 1).to_list(1000)
+    await enrich_many(items)
     results = []
     for item in items:
         parse_datetime_field(item, "created_at")
         parse_datetime_field(item, "updated_at")
-        await enrich_vehicle_info(item)
         item["status"] = compute_maintenance_status(item)
         if status and item["status"] != status:
             continue
@@ -2283,139 +2945,30 @@ async def get_maintenance_summary(user: User = Depends(get_current_user)):
 
 
 # ======================== RUHAVIK IMPORT ROUTES ========================
-
-def _parse_gpx_file(content: str) -> list:
-    """Parse GPX file and extract track points."""
-    points = []
-    try:
-        root = ET.fromstring(content)
-        ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
-        # Try standard GPX 1.1 namespace
-        trkpts = root.findall(".//gpx:trkpt", ns)
-        if not trkpts:
-            # Try without namespace
-            trkpts = root.findall(".//{http://www.topografix.com/GPX/1/1}trkpt")
-        if not trkpts:
-            trkpts = root.findall(".//trkpt")
-        for pt in trkpts:
-            lat = float(pt.get("lat", 0))
-            lng = float(pt.get("lon", 0))
-            time_el = pt.find("gpx:time", ns) or pt.find("{http://www.topografix.com/GPX/1/1}time") or pt.find("time")
-            speed_el = pt.find("gpx:speed", ns) or pt.find("{http://www.topografix.com/GPX/1/1}speed") or pt.find("speed")
-            timestamp = time_el.text if time_el is not None else None
-            speed = float(speed_el.text) * 3.6 if speed_el is not None else 0  # m/s -> km/h
-            if lat and lng:
-                points.append({"lat": lat, "lng": lng, "timestamp": timestamp, "speed": speed})
-    except ET.ParseError as e:
-        logger.error("GPX parse error: %s", e)
-    return points
+# Parsing and idempotent persistence live in `ruhavik.py`; this layer only
+# handles HTTP concerns (upload limits, vehicle lookup, reporting the result).
 
 
-def _parse_csv_ruhavik(content: str) -> list:
-    """Parse Ruhavik CSV export. Columns: timestamp, lat, lng, speed, ..."""
-    points = []
-    reader = csv_module.DictReader(io.StringIO(content))
-    field_map = {}
-    if reader.fieldnames:
-        lower_fields = {f.lower().strip(): f for f in reader.fieldnames}
-        for key in ["latitude", "lat"]:
-            if key in lower_fields:
-                field_map["lat"] = lower_fields[key]
-                break
-        for key in ["longitude", "lng", "lon"]:
-            if key in lower_fields:
-                field_map["lng"] = lower_fields[key]
-                break
-        for key in ["time", "timestamp", "datetime", "date"]:
-            if key in lower_fields:
-                field_map["time"] = lower_fields[key]
-                break
-        for key in ["speed", "velocity"]:
-            if key in lower_fields:
-                field_map["speed"] = lower_fields[key]
-                break
-    for row in reader:
-        try:
-            lat = float(row.get(field_map.get("lat", "latitude"), 0))
-            lng = float(row.get(field_map.get("lng", "longitude"), 0))
-            timestamp = row.get(field_map.get("time", "timestamp"), "")
-            speed = float(row.get(field_map.get("speed", "speed"), 0) or 0)
-            if lat and lng:
-                points.append({"lat": lat, "lng": lng, "timestamp": timestamp, "speed": speed})
-        except (ValueError, TypeError):
-            continue
-    return points
+async def _read_upload(file: UploadFile, max_bytes: int) -> bytes:
+    """Read an upload, refusing anything over the configured limit.
 
-
-def _points_to_trips(points: list, vehicle_id: str, min_gap_minutes: int = 15) -> list:
-    """Split sorted points into trips based on time gaps."""
-    if not points:
-        return []
-    # Sort by timestamp
-    valid_points = [p for p in points if p.get("timestamp")]
-    if not valid_points:
-        # If no timestamps, create one trip from all points
-        now = datetime.now(timezone.utc)
-        return [{
-            "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
-            "vehicle_id": vehicle_id,
-            "start_time": now.isoformat(),
-            "end_time": now.isoformat(),
-            "start_location": {"lat": points[0]["lat"], "lng": points[0]["lng"], "address": f"{points[0]['lat']:.4f}, {points[0]['lng']:.4f}"},
-            "end_location": {"lat": points[-1]["lat"], "lng": points[-1]["lng"], "address": f"{points[-1]['lat']:.4f}, {points[-1]['lng']:.4f}"},
-            "route_points": [{"lat": p["lat"], "lng": p["lng"], "timestamp": now.isoformat()} for p in points],
-            "distance": 0,
-            "max_speed": int(max((p.get("speed", 0) for p in points), default=0)),
-            "avg_speed": int(sum(p.get("speed", 0) for p in points) / len(points)) if points else 0,
-            "synced_to_logbook": False,
-            "created_at": now.isoformat()
-        }]
-    valid_points.sort(key=lambda p: p["timestamp"])
-    trips = []
-    current_trip_points = [valid_points[0]]
-    for i in range(1, len(valid_points)):
-        try:
-            prev_t = datetime.fromisoformat(valid_points[i - 1]["timestamp"].replace("Z", "+00:00"))
-            curr_t = datetime.fromisoformat(valid_points[i]["timestamp"].replace("Z", "+00:00"))
-            gap = (curr_t - prev_t).total_seconds() / 60
-        except (ValueError, TypeError):
-            gap = 0
-        if gap > min_gap_minutes:
-            trips.append(current_trip_points)
-            current_trip_points = []
-        current_trip_points.append(valid_points[i])
-    if current_trip_points:
-        trips.append(current_trip_points)
-
-    now = datetime.now(timezone.utc)
-    result = []
-    for trip_pts in trips:
-        if len(trip_pts) < 2:
-            continue
-        start = trip_pts[0]
-        end = trip_pts[-1]
-        speeds = [p.get("speed", 0) for p in trip_pts]
-        # Estimate distance using Haversine approximation
-        total_dist = 0
-        for j in range(1, len(trip_pts)):
-            dlat = (trip_pts[j]["lat"] - trip_pts[j - 1]["lat"]) * 111320
-            dlng = (trip_pts[j]["lng"] - trip_pts[j - 1]["lng"]) * 111320 * 0.65
-            total_dist += (dlat ** 2 + dlng ** 2) ** 0.5
-        result.append({
-            "trip_id": f"gps_{uuid.uuid4().hex[:12]}",
-            "vehicle_id": vehicle_id,
-            "start_time": start["timestamp"],
-            "end_time": end["timestamp"],
-            "start_location": {"lat": start["lat"], "lng": start["lng"], "address": f"{start['lat']:.4f}, {start['lng']:.4f}"},
-            "end_location": {"lat": end["lat"], "lng": end["lng"], "address": f"{end['lat']:.4f}, {end['lng']:.4f}"},
-            "route_points": [{"lat": p["lat"], "lng": p["lng"], "timestamp": p["timestamp"]} for p in trip_pts],
-            "distance": int(total_dist),
-            "max_speed": int(max(speeds, default=0)),
-            "avg_speed": int(sum(speeds) / len(speeds)) if speeds else 0,
-            "synced_to_logbook": False,
-            "created_at": now.isoformat()
-        })
-    return result
+    Read in chunks so an oversized file is rejected without first buffering it
+    all in memory.
+    """
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 256)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Soubor je příliš velký (limit {max_bytes // (1024 * 1024)} MB).",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @api_router.post("/gps/import-ruhavik")
@@ -2424,57 +2977,114 @@ async def import_ruhavik_data(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user)
 ):
-    """Import GPS data from Ruhavik CSV or GPX file"""
+    """Import drives from a Ruhavik CSV or GPX export.
+
+    The import is idempotent: every drive carries a stable identifier, so
+    uploading the same export twice reports the drives as already imported
+    instead of duplicating them. Individual unreadable records are counted and
+    reported; they never abort the rest of the file. Imported drives are stored
+    with ``source = "ruhavik"`` and are therefore part of every trip report.
+    """
     vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
 
-    content = (await file.read()).decode("utf-8", errors="ignore")
-    filename = (file.filename or "").lower()
+    raw = await _read_upload(file, settings.max_import_bytes)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Nahraný soubor je prázdný.")
+    content = raw.decode("utf-8-sig", errors="replace")
 
-    points = []
-    if filename.endswith(".gpx"):
-        points = _parse_gpx_file(content)
-    elif filename.endswith(".csv"):
-        points = _parse_csv_ruhavik(content)
-    else:
-        raise HTTPException(status_code=400, detail="Nepodporovaný formát. Nahrajte .csv nebo .gpx soubor.")
+    try:
+        candidates, parse_errors, detected_format = ruhavik_import.parse_ruhavik_file(
+            file.filename or "", content, vehicle_id
+        )
+    except ruhavik_import.ImportError_ as exc:
+        logger.info("Ruhavik import odmítnut (%s): %s", file.filename, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Ruhavik import selhal na neočekávané chybě")
+        raise HTTPException(status_code=400, detail=f"Soubor se nepodařilo zpracovat: {exc}") from exc
 
-    if not points:
-        raise HTTPException(status_code=400, detail="Soubor neobsahuje žádné platné GPS body.")
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="V souboru nebyla nalezena žádná jízda. "
+                   + (f"Chyby: {'; '.join(parse_errors[:3])}" if parse_errors else ""),
+        )
 
-    trips = _points_to_trips(points, vehicle_id)
+    result = await ruhavik_import.store_trips(db, candidates)
+    total_rejected = result["rejected"] + len(parse_errors)
 
-    for trip in trips:
-        await db.gps_trips.insert_one(trip)
+    logger.info(
+        "Ruhavik import (%s, formát %s, vozidlo %s): %d nových jízd, %d duplicit trackeru, "
+        "%d již importovaných, %d chybných záznamů",
+        file.filename, detected_format, vehicle_id, result["imported"],
+        result["duplicates_of_tracker"], result["skipped_already_imported"], total_rejected,
+    )
+
+    message_parts = [f"Importováno {result['imported']} jízd"]
+    if result["duplicates_of_tracker"]:
+        message_parts.append(f"{result['duplicates_of_tracker']} označeno jako duplicita GPS jízdy")
+    if result["skipped_already_imported"]:
+        message_parts.append(f"{result['skipped_already_imported']} již bylo importováno dříve")
+    if total_rejected:
+        message_parts.append(f"{total_rejected} záznamů se nepodařilo načíst")
 
     return {
-        "message": f"Importováno {len(trips)} tras z {len(points)} bodů",
-        "trips_count": len(trips),
-        "points_count": len(points),
-        "trip_ids": [t["trip_id"] for t in trips]
+        "message": ", ".join(message_parts),
+        "format": detected_format,
+        "vehicle_id": vehicle_id,
+        "imported": result["imported"],
+        "duplicates_of_tracker": result["duplicates_of_tracker"],
+        "skipped_already_imported": result["skipped_already_imported"],
+        "rejected": total_rejected,
+        "errors": (parse_errors + result["rejected_details"])[:20],
+        "trip_ids": result["trip_ids"],
+        # Kept for backwards compatibility with the existing frontend.
+        "trips_count": result["imported"],
     }
 
 
 # ======================== UPLOAD & ROOT ========================
 
+ALLOWED_UPLOAD_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+
+
+async def _image_to_data_url(file: UploadFile) -> dict:
+    """Validate an uploaded image and return it as a data URL.
+
+    Uploads are inlined as base64 data URLs (that is how photos are stored in
+    this application), so both the media type and the size have to be checked:
+    an unbounded upload would otherwise be echoed straight into a MongoDB
+    document.
+    """
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    if content_type not in ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Nepodporovaný typ souboru: {content_type or 'neznámý'}. "
+                   f"Povolené: {', '.join(sorted(ALLOWED_UPLOAD_TYPES))}.",
+        )
+    content = await _read_upload(file, settings.max_upload_bytes)
+    if not content:
+        raise HTTPException(status_code=400, detail="Nahraný soubor je prázdný.")
+    base64_content = base64.b64encode(content).decode("utf-8")
+    # The original filename is never used as a path, and it is not echoed back
+    # verbatim either — only its basename, so it cannot carry directory parts.
+    safe_name = os.path.basename(file.filename or "upload")
+    return {"url": f"data:{content_type};base64,{base64_content}", "filename": safe_name}
+
+
 @api_router.post("/upload")
 async def upload_file(file: UploadFile = File(...), user: User = Depends(get_current_user)):
-    """Upload a file and return base64 data URL"""
-    content = await file.read()
-    base64_content = base64.b64encode(content).decode('utf-8')
-    content_type = file.content_type or 'image/jpeg'
-    data_url = f"data:{content_type};base64,{base64_content}"
-    return {"url": data_url, "filename": file.filename}
+    """Upload an image and return it as a base64 data URL."""
+    return await _image_to_data_url(file)
+
 
 @api_router.post("/public/upload")
 async def public_upload_file(file: UploadFile = File(...)):
-    """Upload a file (public endpoint for QR flows)"""
-    content = await file.read()
-    base64_content = base64.b64encode(content).decode('utf-8')
-    content_type = file.content_type or 'image/jpeg'
-    data_url = f"data:{content_type};base64,{base64_content}"
-    return {"url": data_url, "filename": file.filename}
+    """Upload an image from a QR flow (public endpoint)."""
+    return await _image_to_data_url(file)
 
 # ======================== RESERVATION REPORTS (Report ujetých km) ========================
 import re as _re
@@ -2516,11 +3126,11 @@ async def get_reservation_settings() -> dict:
     return settings
 
 
-def _distance_between(settings, loc_a, loc_b):
+def _distance_between(res_settings, loc_a, loc_b):
     ka, kb = _loc_key(loc_a), _loc_key(loc_b)
     if not ka or not kb or ka == kb:
         return 0.0
-    for d in settings.get("distances", []):
+    for d in res_settings.get("distances", []):
         df, dt = _loc_key(d.get("from")), _loc_key(d.get("to"))
         if {df, dt} == {ka, kb}:
             try:
@@ -2690,11 +3300,25 @@ async def _match_or_create_vehicle(vehicle_name, cache):
     return vehicle_id
 
 
-async def _load_positions(vehicle_id):
+async def _load_positions(vehicle_id, start_utc=None, end_utc=None):
+    """Load a vehicle's GPS positions, optionally bounded to a time window.
+
+    Without a window this pulled a vehicle's entire recorded history for every
+    reservation report — hundreds of thousands of points to evaluate a single
+    week. The bounded query uses the (vehicle_id, timestamp) index; the exact
+    per-drive filtering still happens in `_km_in_window`.
+    """
     if not vehicle_id:
         return []
+    query = {"vehicle_id": vehicle_id}
+    if start_utc or end_utc:
+        lo = (start_utc - timedelta(minutes=5)).replace(tzinfo=timezone.utc) if start_utc else None
+        hi = (end_utc + timedelta(minutes=5)).replace(tzinfo=timezone.utc) if end_utc else None
+        range_filter = trips_service.timestamp_range_query("timestamp", lo, hi)
+        if range_filter:
+            query.update(range_filter)
     positions = await db.vehicle_positions.find(
-        {"vehicle_id": vehicle_id}, {"_id": 0, "lat": 1, "lng": 1, "timestamp": 1}
+        query, {"_id": 0, "lat": 1, "lng": 1, "timestamp": 1}
     ).to_list(200000)
     parsed = []
     for p in positions:
@@ -2705,7 +3329,7 @@ async def _load_positions(vehicle_id):
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00")) if isinstance(ts, str) else ts
             if getattr(dt, "tzinfo", None) is not None:
                 dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             continue
         parsed.append((dt, la, ln))
     parsed.sort(key=lambda x: x[0])
@@ -2759,16 +3383,19 @@ def _instructor_match(teacher, instr_name):
 @api_router.post("/reservations/import")
 async def import_reservations(file: UploadFile = File(...), user: User = Depends(get_admin_user)):
     """Import a reservation-system export and store parsed drives."""
-    content = await file.read()
+    content = await _read_upload(file, settings.max_import_bytes)
+    if not content:
+        raise HTTPException(status_code=400, detail="Nahraný soubor je prázdný.")
     try:
         rows = parse_reservation_file(content)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Nepodařilo se načíst soubor: {e}")
+    except Exception as exc:
+        logger.warning("Import rezervací (%s) se nepodařilo načíst: %s", file.filename, exc)
+        raise HTTPException(status_code=400, detail=f"Nepodařilo se načíst soubor: {exc}") from exc
     if not rows:
         raise HTTPException(status_code=400, detail="V souboru nebyla nalezena žádná data")
 
-    settings = await get_reservation_settings()
-    mpu = settings.get("minutes_per_hour_unit", 45)
+    res_settings = await get_reservation_settings()
+    mpu = res_settings.get("minutes_per_hour_unit", 45)
     batch_id = f"batch_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     cache = {}
@@ -2849,9 +3476,9 @@ async def get_reservation_drives(
         name = instr.get("name") if instr else user.name
         drives = [d for d in drives if (d.get("vehicle_id") in assigned) or _instructor_match(d.get("teacher"), name)]
 
-    settings = await get_reservation_settings()
-    base_limit = float(settings.get("base_limit_km", 60))
-    tz_off = settings.get("gps_tz_offset_hours", 2)
+    res_settings = await get_reservation_settings()
+    base_limit = float(res_settings.get("base_limit_km", 60))
+    tz_off = res_settings.get("gps_tz_offset_hours", 2)
 
     # tolerance per drive (group by vehicle + date, ordered by time)
     groups = _defaultdict(list)
@@ -2863,18 +3490,29 @@ async def get_reservation_drives(
         for i, d in enumerate(items_sorted):
             prev_loc = items_sorted[i - 1].get("boarding_location") if i > 0 else None
             next_loc = items_sorted[i + 1].get("boarding_location") if i < len(items_sorted) - 1 else None
-            approach = _distance_between(settings, prev_loc, d.get("boarding_location")) if prev_loc else 0.0
-            departure = _distance_between(settings, d.get("boarding_location"), next_loc) if next_loc else 0.0
+            approach = _distance_between(res_settings, prev_loc, d.get("boarding_location")) if prev_loc else 0.0
+            departure = _distance_between(res_settings, d.get("boarding_location"), next_loc) if next_loc else 0.0
             tol_map[d["drive_id"]] = round(approach + departure, 1)
 
-    # preload GPS positions once per vehicle
+    # Precompute each drive's window once, then load only the GPS positions
+    # that fall inside the reported period for each vehicle.
+    windows = {d["drive_id"]: _drive_window_utc(d, tz_off) for d in drives}
+    per_vehicle_bounds = {}
+    for d in drives:
+        vid = d.get("vehicle_id")
+        start_utc, end_utc = windows[d["drive_id"]]
+        if not (vid and start_utc):
+            continue
+        lo, hi = per_vehicle_bounds.get(vid, (start_utc, end_utc or start_utc))
+        per_vehicle_bounds[vid] = (min(lo, start_utc), max(hi, end_utc or start_utc))
+
     pos_cache = {}
-    for vid in {d.get("vehicle_id") for d in drives if d.get("vehicle_id")}:
-        pos_cache[vid] = await _load_positions(vid)
+    for vid, (lo, hi) in per_vehicle_bounds.items():
+        pos_cache[vid] = await _load_positions(vid, lo, hi)
 
     result = []
     for d in drives:
-        start_utc, end_utc = _drive_window_utc(d, tz_off)
+        start_utc, end_utc = windows[d["drive_id"]]
         gps = _km_in_window(pos_cache.get(d.get("vehicle_id"), []), start_utc, end_utc)
         tolerance = tol_map.get(d["drive_id"], 0.0)
         eff_limit = round(base_limit + tolerance, 1)
@@ -2910,10 +3548,10 @@ async def get_reservation_drive_route(drive_id: str, user: User = Depends(get_cu
         raise HTTPException(status_code=404, detail="Jízda nenalezena")
     if d.get("is_private"):
         return {"private": True, "points": [], "gps_km": None}
-    settings = await get_reservation_settings()
-    tz_off = settings.get("gps_tz_offset_hours", 2)
+    res_settings = await get_reservation_settings()
+    tz_off = res_settings.get("gps_tz_offset_hours", 2)
     start_utc, end_utc = _drive_window_utc(d, tz_off)
-    positions = await _load_positions(d.get("vehicle_id"))
+    positions = await _load_positions(d.get("vehicle_id"), start_utc, end_utc)
     gps = _km_in_window(positions, start_utc, end_utc)
     return {"private": False, "points": gps["points"], "gps_km": gps["gps_km"]}
 
@@ -2922,8 +3560,8 @@ async def get_reservation_drive_route(drive_id: str, user: User = Depends(get_cu
 async def toggle_drive_private(drive_id: str, request: Request, user: User = Depends(get_current_user)):
     body = await request.json()
     is_private = bool(body.get("is_private"))
-    settings = await get_reservation_settings()
-    if user.role == "instructor" and not settings.get("private_by_instructor", True):
+    res_settings = await get_reservation_settings()
+    if user.role == "instructor" and not res_settings.get("private_by_instructor", True):
         raise HTTPException(status_code=403, detail="Instruktor nemá oprávnění měnit soukromí jízdy")
     res = await db.reservation_drives.update_one({"drive_id": drive_id}, {"$set": {"is_private": is_private}})
     if res.matched_count == 0:
@@ -2967,7 +3605,7 @@ async def reservation_vehicle_mapping(user: User = Depends(get_admin_user)):
     return {"reservation_vehicle_names": [n for n in names if n], "vehicles": vehicles}
 
 # ---------- ICS (iCalendar) calendar sync ----------
-from zoneinfo import ZoneInfo as _ZoneInfo
+from zoneinfo import ZoneInfo as _ZoneInfo, ZoneInfoNotFoundError
 
 _PRAGUE_TZ = _ZoneInfo("Europe/Prague")
 
@@ -3034,7 +3672,8 @@ def _parse_ics_dt(field):
         else:
             naive = datetime.strptime(val, "%Y%m%d")
             dt = naive.replace(tzinfo=_PRAGUE_TZ)
-    except (ValueError, Exception):
+    except (ValueError, KeyError, TypeError, ZoneInfoNotFoundError) as exc:
+        logger.debug("Nečitelné ICS datum %r: %s", val, exc)
         return None
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
@@ -3068,18 +3707,74 @@ def _parse_ics_summary(summary):
     return customer, activity, _norm_loc(boarding) if boarding else "", ("; ".join(notes) or None)
 
 
-async def _sync_instructor_ics(instr, settings, cache):
-    """Fetch + parse one instructor's ICS feed into reservation_drives. Returns count."""
+MAX_ICS_BYTES = 10 * 1024 * 1024
+
+
+def validate_external_url(url: str) -> str:
+    """Validate a user-supplied URL before the server fetches it.
+
+    ICS feed addresses are entered by administrators, and the server fetches
+    them itself — an unchecked address turns the backend into a proxy for the
+    internal network (SSRF). Only http(s) is allowed, and by default hosts that
+    resolve to a loopback, link-local or private address are refused.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    if url.lower().startswith("webcal://"):
+        url = "https://" + url[len("webcal://"):]
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"nepodporované schéma URL: {parsed.scheme or 'chybí'}")
+    if not parsed.hostname:
+        raise ValueError("URL neobsahuje hostitele")
+
+    if settings.ics_allow_private_hosts:
+        return url
+
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"hostitele {parsed.hostname} se nepodařilo přeložit") from exc
+
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_reserved or address.is_multicast):
+            raise ValueError(
+                f"adresa {address} je v neveřejném rozsahu; "
+                "pro interní kalendáře nastavte ICS_ALLOW_PRIVATE_HOSTS=true"
+            )
+    return url
+
+
+async def _sync_instructor_ics(instr, settings_doc, cache):
+    """Fetch + parse one instructor's ICS feed into reservation_drives."""
     url = (instr or {}).get("ics_url")
     if not url:
         return {"instructor": (instr or {}).get("name"), "events": 0, "error": "chybí ICS URL"}
     try:
+        url = validate_external_url(url)
+    except ValueError as exc:
+        logger.warning("ICS odkaz instruktora %s odmítnut: %s", instr.get("instructor_id"), exc)
+        return {"instructor": instr.get("name"), "events": 0, "error": f"neplatný odkaz: {exc}"}
+
+    try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(20.0, connect=10.0)) as http:
             resp = await http.get(url)
         if resp.status_code != 200:
+            logger.warning("ICS feed %s vrátil HTTP %s", instr.get("instructor_id"), resp.status_code)
             return {"instructor": instr.get("name"), "events": 0, "error": f"HTTP {resp.status_code}"}
+        if len(resp.content) > MAX_ICS_BYTES:
+            return {"instructor": instr.get("name"), "events": 0, "error": "ICS soubor je příliš velký"}
         events = _parse_ics_events(resp.text)
+    except httpx.HTTPError as e:
+        logger.warning("ICS feed instruktora %s se nepodařilo stáhnout: %s", instr.get("instructor_id"), e)
+        return {"instructor": instr.get("name"), "events": 0, "error": str(e)}
     except Exception as e:
+        logger.exception("Neočekávaná chyba při ICS synchronizaci instruktora %s", instr.get("instructor_id"))
         return {"instructor": instr.get("name"), "events": 0, "error": str(e)}
 
     batch_id = f"ics_{instr['instructor_id']}"
@@ -3109,7 +3804,7 @@ async def _sync_instructor_ics(instr, settings, cache):
             "date": local_start.date().isoformat(),
             "start_datetime": local_start.isoformat(),
             "start_utc": start.isoformat(),
-            "hours": round(duration_min / settings.get("minutes_per_hour_unit", 45), 2) if duration_min else None,
+            "hours": round(duration_min / settings_doc.get("minutes_per_hour_unit", 45), 2) if duration_min else None,
             "duration_min": duration_min,
             "teacher": instr.get("name"),
             "instructor_id": instr.get("instructor_id"),
@@ -3152,13 +3847,13 @@ async def _run_full_ics_sync(trigger="manual"):
         upsert=True,
     )
     try:
-        settings = await get_reservation_settings()
+        res_settings = await get_reservation_settings()
         instructors = await db.instructors.find({}, {"_id": 0}).to_list(500)
         instructors = [i for i in instructors if i.get("ics_url")]
         cache = {}
         results = []
         for idx, instr in enumerate(instructors):
-            results.append(await _sync_instructor_ics(instr, settings, cache))
+            results.append(await _sync_instructor_ics(instr, res_settings, cache))
             if idx < len(instructors) - 1:
                 await asyncio.sleep(_ICS_FETCH_DELAY_SEC)  # be gentle on the ICS server
         total = sum(r["events"] for r in results)
@@ -3177,10 +3872,10 @@ async def _run_full_ics_sync(trigger="manual"):
 @api_router.get("/reservations/ics-status")
 async def get_ics_status(user: User = Depends(get_current_user)):
     doc = await db.app_settings.find_one({"key": "ics_sync_status"}, {"_id": 0})
-    settings = await get_reservation_settings()
+    res_settings = await get_reservation_settings()
     return {
-        "auto_sync": settings.get("ics_auto_sync", True),
-        "interval_minutes": settings.get("ics_sync_interval_minutes", 60),
+        "auto_sync": res_settings.get("ics_auto_sync", True),
+        "interval_minutes": res_settings.get("ics_sync_interval_minutes", 60),
         "running": _ics_sync_running,
         "status": doc,
     }
@@ -3200,8 +3895,8 @@ async def sync_ics(request: Request, user: User = Depends(get_admin_user)):
         instr = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
         if not instr or not instr.get("ics_url"):
             raise HTTPException(status_code=400, detail="Instruktor nemá nastavený ICS odkaz")
-        settings = await get_reservation_settings()
-        res = await _sync_instructor_ics(instr, settings, {})
+        res_settings = await get_reservation_settings()
+        res = await _sync_instructor_ics(instr, res_settings, {})
         return {"synced": 1, "total_events": res["events"], "results": [res]}
 
     # full sync -> background
@@ -3220,9 +3915,9 @@ async def ics_auto_sync_loop():
     while True:
         interval = 60
         try:
-            settings = await get_reservation_settings()
-            interval = max(5, int(settings.get("ics_sync_interval_minutes", 60)))
-            if settings.get("ics_auto_sync", True):
+            res_settings = await get_reservation_settings()
+            interval = max(5, int(res_settings.get("ics_sync_interval_minutes", 60)))
+            if res_settings.get("ics_auto_sync", True):
                 summary = await _run_full_ics_sync(trigger="auto")
                 logger.info("Auto ICS sync: %d instructors, %d events", summary["synced"], summary["total_events"])
         except Exception as e:
@@ -3235,69 +3930,231 @@ async def ics_auto_sync_loop():
 
 
 
-# ======================== ROOT ========================
+# ======================== ROOT & HEALTH ========================
 
 @api_router.get("/")
 async def root():
-    return {"message": "Fleet Management API - Autoškola"}
+    return {"message": "Fleet Management API - Autoškola", "version": app.version}
+
+
+@api_router.get("/config")
+async def get_client_config(user: User = Depends(get_current_user)):
+    """Feature flags the UI needs to know about.
+
+    Lets the frontend hide controls that the backend would refuse anyway
+    (the demo-data generators), instead of offering a button that 403s.
+    """
+    return {
+        "environment": settings.environment,
+        "allow_mock_data": settings.allow_mock_data,
+        "teltonika_enabled": settings.teltonika_enabled,
+        "teltonika_port": settings.teltonika_port,
+        "trip_sources": list(trips_service.REPORTABLE_SOURCES),
+    }
+
+
+@api_router.get("/health")
+async def health():
+    """Liveness/readiness probe.
+
+    Unauthenticated by design: Docker, Nginx and any external monitor must be
+    able to tell a starting container from a broken one without credentials.
+    Returns 503 while MongoDB is unreachable so an orchestrator does not send
+    traffic to an instance that cannot answer.
+    """
+    db_ok = await database.ping(timeout=3.0)
+    payload = {
+        "status": "ok" if db_ok else "degraded",
+        "database": "up" if db_ok else "down",
+        "teltonika": bool(teltonika_server and teltonika_server.is_running),
+        "environment": settings.environment,
+        "version": app.version,
+    }
+    if not db_ok:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
+
 
 # Include the router
 app.include_router(api_router)
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS. The supported deployment serves the frontend and the API from one
+# origin through Nginx, where CORS is not involved at all — hence the empty
+# default. `allow_origins=["*"]` together with credentials is refused in
+# production by the config validation, because it would let any site issue
+# authenticated requests on a logged-in user's behalf.
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_credentials=True,
+        allow_origins=settings.cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info("CORS povolen pro: %s", ", ".join(settings.cors_origins))
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Baseline response headers for API responses."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Log the cause, return a generic message.
+
+    An unexpected failure must be diagnosable from the server log, without the
+    stack trace being handed to the caller.
+    """
+    logger.exception("Neošetřená chyba při zpracování %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Interní chyba serveru. Podrobnosti najdete v logu aplikace."},
+    )
+
 
 async def seed_admin():
-    """Seed admin user on startup."""
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@autoskola.cz").lower()
-    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin123!")
+    """Ensure an administrator account exists.
+
+    The password is only written when the account is created or has no
+    password at all. An existing password is left alone unless
+    ADMIN_PASSWORD_RESET_ON_START is set explicitly — otherwise every restart
+    would silently undo a password an operator had changed.
+    """
+    if not settings.admin_password:
+        logger.warning("ADMIN_PASSWORD není nastaven — administrátorský účet nebude vytvořen.")
+        return
+
+    admin_email = settings.admin_email
     existing = await db.users.find_one({"email": admin_email}, {"_id": 0})
+
     if existing is None:
-        hashed = hash_password(admin_password)
         await db.users.insert_one({
             "user_id": f"user_{uuid.uuid4().hex[:12]}",
             "email": admin_email,
             "name": "Admin",
-            "password_hash": hashed,
+            "password_hash": hash_password(settings.admin_password),
             "role": "admin",
             "created_at": datetime.now(timezone.utc).isoformat()
         })
-        logger.info("Admin account seeded: %s", admin_email)
-    elif not existing.get("password_hash"):
-        hashed = hash_password(admin_password)
+        logger.info("Administrátorský účet vytvořen: %s", admin_email)
+        return
+
+    if not existing.get("password_hash"):
         await db.users.update_one(
             {"email": admin_email},
-            {"$set": {"password_hash": hashed}}
+            {"$set": {"password_hash": hash_password(settings.admin_password)}}
         )
-        logger.info("Admin password_hash added to existing account: %s", admin_email)
-    elif not verify_password(admin_password, existing["password_hash"]):
-        hashed = hash_password(admin_password)
+        logger.info("Administrátorskému účtu %s bylo doplněno heslo", admin_email)
+        return
+
+    if settings.admin_password_reset_on_start and not verify_password(
+        settings.admin_password, existing["password_hash"]
+    ):
         await db.users.update_one(
             {"email": admin_email},
-            {"$set": {"password_hash": hashed}}
+            {"$set": {"password_hash": hash_password(settings.admin_password)}}
         )
-        logger.info("Admin password updated: %s", admin_email)
+        logger.info("Heslo administrátora %s bylo obnoveno podle ADMIN_PASSWORD", admin_email)
 
 
-@app.on_event("startup")
+async def backfill_trip_sources() -> int:
+    """Give trips stored before the `source` field existed an explicit source.
+
+    Purely additive: no document is removed or rewritten beyond gaining the
+    fields the reporting layer expects. Safe to run on every start.
+    """
+    try:
+        result = await db.gps_trips.update_many(
+            {"source": {"$exists": False}},
+            {"$set": {"source": trips_service.LEGACY_SOURCE, "duplicate_of": None}},
+        )
+        if result.modified_count:
+            logger.info(
+                "Doplněn zdroj u %d historických jízd (%s)",
+                result.modified_count, trips_service.LEGACY_SOURCE,
+            )
+        return result.modified_count
+    except PyMongoError as exc:
+        logger.warning("Doplnění zdroje jízd se nezdařilo: %s", exc)
+        return 0
+
+
+_background_tasks: List[asyncio.Task] = []
+
+
 async def startup_tasks():
+    """Bring the application up in a defined, observable order.
+
+    Configuration is validated first and fatally: an unsafe production
+    configuration must stop the process, not start an application that quietly
+    uses a publicly known secret.
+    """
+    logger.info("Fleet Manager %s se spouští: %s", app.version, settings.safe_summary())
+
+    try:
+        settings.validate()
+    except ConfigError as exc:
+        logger.critical("%s", exc)
+        raise
+
+    if not await database.wait_until_ready():
+        raise RuntimeError(
+            "MongoDB není dostupná. Zkontrolujte MONGO_URL a stav databázového kontejneru."
+        )
+
+    await database.ensure_indexes(db)
+    await backfill_trip_sources()
+
     try:
         await seed_admin()
+    except PyMongoError:
+        logger.exception("Vytvoření administrátorského účtu selhalo")
+        raise
+
+    try:
         await start_teltonika_server()
-        asyncio.create_task(ics_auto_sync_loop())
-        logger.info("Startup complete: admin seeded, Teltonika TCP started, ICS auto-sync scheduled")
-    except Exception as e:
-        logger.error("Startup error: %s", e)
+    except OSError as exc:
+        logger.error(
+            "Teltonika TCP přijímač se nepodařilo spustit na portu %d: %s",
+            settings.teltonika_port, exc,
+        )
+
+    _background_tasks.append(asyncio.create_task(ics_auto_sync_loop()))
+    logger.info("Start dokončen — API je připraveno.")
 
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
+async def shutdown_tasks():
+    """Stop background work before the process exits."""
+    for task in _background_tasks:
+        task.cancel()
+    for task in _background_tasks:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    _background_tasks.clear()
+
     if teltonika_server:
         await teltonika_server.stop()
-    client.close()
+    await database.close()
+    logger.info("Fleet Manager ukončen.")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Application lifespan: start everything up, then wind it down cleanly."""
+    await startup_tasks()
+    try:
+        yield
+    finally:
+        await shutdown_tasks()
+
+
+# Registered after the hooks are defined; `on_event` is deprecated in FastAPI.
+app.router.lifespan_context = lifespan

@@ -36,7 +36,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
-    "cra-template": "1.2.0",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
     "html5-qrcode": "^2.3.8",
@@ -63,7 +62,9 @@
   "scripts": {
     "start": "craco start",
     "build": "craco build",
-    "test": "craco test"
+    "test": "craco test",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix"
   },
   "browserslist": {
     "production": [

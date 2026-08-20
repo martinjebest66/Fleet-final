@@ -1,3 +1,6 @@
+# NOTE: live-server integration test — needs a running Fleet Manager.
+# Configure with FLEET_BASE_URL / FLEET_ADMIN_EMAIL / FLEET_ADMIN_PASSWORD.
+# Excluded from the default pytest run; see tests/integration/conftest.py.
 """
 Test suite for Iteration 10 - New Features:
 1. Maintenance (Údržba Vozidel) - CRUD operations, status computation, summary KPIs
@@ -9,7 +12,7 @@ import requests
 import os
 from datetime import datetime, timedelta
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+BASE_URL = (os.environ.get('FLEET_BASE_URL') or os.environ.get('REACT_APP_BACKEND_URL', '')).rstrip('/')
 
 # ======================== FIXTURES ========================
 
@@ -26,7 +29,7 @@ def admin_session(session):
     """Authenticated admin session using cookies"""
     login_response = session.post(
         f"{BASE_URL}/api/auth/login",
-        json={"email": "admin@autoskola.cz", "password": "Admin123!"}
+        json={"email": os.environ.get("FLEET_ADMIN_EMAIL", ""), "password": os.environ.get("FLEET_ADMIN_PASSWORD", "")}
     )
     assert login_response.status_code == 200, f"Admin login failed: {login_response.text}"
     return session
