@@ -50,6 +50,8 @@ export default function Settings() {
         minutes_per_hour_unit: parseInt(s.minutes_per_hour_unit) || 45,
         gps_tz_offset_hours: parseInt(s.gps_tz_offset_hours) || 0,
         private_by_instructor: !!s.private_by_instructor,
+        ics_auto_sync: !!s.ics_auto_sync,
+        ics_sync_interval_minutes: parseInt(s.ics_sync_interval_minutes) || 60,
         locations: (s.locations || []).map((x) => x.trim()).filter(Boolean),
         distances: (s.distances || [])
           .filter((d) => d.from && d.to)
@@ -102,6 +104,21 @@ export default function Settings() {
           <div className="flex items-center gap-3 pt-6">
             <Switch disabled={!isAdmin} checked={!!s.private_by_instructor} onCheckedChange={(v) => setField("private_by_instructor", v)} data-testid="setting-private-instructor" />
             <span className="text-sm">Instruktor smí označit jízdu jako soukromou</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3"><CardTitle className="text-base">Automatická synchronizace kalendářů (ICS)</CardTitle></CardHeader>
+        <CardContent className="grid sm:grid-cols-2 gap-4">
+          <div className="flex items-center gap-3">
+            <Switch disabled={!isAdmin} checked={!!s.ics_auto_sync} onCheckedChange={(v) => setField("ics_auto_sync", v)} data-testid="setting-ics-auto" />
+            <span className="text-sm">Synchronizovat kalendáře automaticky</span>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-[#71717A] mb-1">Interval synchronizace (min)</label>
+            <input type="number" min="5" disabled={!isAdmin} value={s.ics_sync_interval_minutes} onChange={(e) => setField("ics_sync_interval_minutes", e.target.value)} className={numInput} data-testid="setting-ics-interval" />
+            <p className="text-[11px] text-[#A1A1AA] mt-1">Výchozí 60 min. Kalendáře se pak stahují samy na pozadí.</p>
           </div>
         </CardContent>
       </Card>

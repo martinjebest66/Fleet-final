@@ -196,6 +196,18 @@ frontend:
         -working: "NA"
         -agent: "main"
         -comment: "New Report km page (upload, filters, KPI cards, table with exceeded highlight, private switch), Settings page (all values editable), sidebar reorganized into sections. Screenshots confirm rendering with 365 rows and exceeded row highlighted. Frontend testing pending user permission."
+  - task: "ICS auto-sync (hourly) + ics-status + Teltonika GPS flow + vehicle alias field"
+    implemented: true
+    working: true
+    file: "backend/server.py, frontend/src/pages/vehicles/VehicleFormModal.jsx, frontend/src/pages/Settings.jsx, frontend/src/pages/ReservationReport.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Background ics_auto_sync_loop() runs hourly (configurable), GET /api/reservations/ics-status shows last sync (verified: auto sync ran 387 events, status line shown in UI). Teltonika real flow verified end-to-end (IMEI->vehicle register, test packet on :5027 -> position stored source=teltonika, device online, tcp-status records=2). Added reservation_alias to vehicle form + auto-sync toggle/interval to Settings + last-sync line to Report km."
+
 
 metadata:
   created_by: "main_agent"

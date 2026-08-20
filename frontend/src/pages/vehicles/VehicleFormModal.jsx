@@ -120,6 +120,18 @@ export function VehicleFormModal({ open, onOpenChange, formData, setFormData, in
             </Select>
           </div>
 
+          <div>
+            <Label htmlFor="reservation_alias">Název v kalendáři (ICS)</Label>
+            <Input
+              id="reservation_alias"
+              value={formData.reservation_alias || ""}
+              onChange={(e) => setFormData({ ...formData, reservation_alias: e.target.value })}
+              placeholder="Např. Černý Golf VII"
+              data-testid="vehicle-alias-input"
+            />
+            <p className="text-xs text-[#A1A1AA] mt-1">Přesný název vozidla v rezervačním systému / kalendáři – slouží k napárování jízd a GPS.</p>
+          </div>
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Zrušit

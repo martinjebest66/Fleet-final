@@ -2485,6 +2485,8 @@ DEFAULT_RESERVATION_SETTINGS = {
     "minutes_per_hour_unit": 45,   # 1 "hodina" ve výcviku = 45 min
     "gps_tz_offset_hours": 2,      # posun místního času vůči UTC v GPS datech
     "private_by_instructor": True,  # smí instruktor označit jízdu jako soukromou
+    "ics_auto_sync": True,          # automatická synchronizace ICS kalendářů
+    "ics_sync_interval_minutes": 60,  # jak často (min)
     "locations": ["Karlovy Vary, Dolní nádraží", "Ostrov, Učebna"],
     "distances": [
         {"from": "Karlovy Vary, Dolní nádraží", "to": "Ostrov, Učebna", "km": 12.0},
@@ -3072,7 +3074,7 @@ async def _sync_instructor_ics(instr, settings, cache):
     if not url:
         return {"instructor": (instr or {}).get("name"), "events": 0, "error": "chybí ICS URL"}
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as http:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(20.0, connect=10.0)) as http:
             resp = await http.get(url)
         if resp.status_code != 200:
             return {"instructor": instr.get("name"), "events": 0, "error": f"HTTP {resp.status_code}"}
@@ -3135,26 +3137,99 @@ async def _sync_instructor_ics(instr, settings, cache):
     return {"instructor": instr.get("name"), "events": len(docs), "error": None}
 
 
+_ics_sync_running = False
+_ICS_FETCH_DELAY_SEC = 3  # gentle delay between feeds to avoid rate-limiting
+
+
+async def _run_full_ics_sync(trigger="manual"):
+    """Sync all instructors sequentially (gentle) with a delay to avoid rate-limiting."""
+    global _ics_sync_running
+    _ics_sync_running = True
+    started = datetime.now(timezone.utc).isoformat()
+    await db.app_settings.update_one(
+        {"key": "ics_sync_status"},
+        {"$set": {"key": "ics_sync_status", "running": True, "trigger": trigger, "started_at": started}},
+        upsert=True,
+    )
+    try:
+        settings = await get_reservation_settings()
+        instructors = await db.instructors.find({}, {"_id": 0}).to_list(500)
+        instructors = [i for i in instructors if i.get("ics_url")]
+        cache = {}
+        results = []
+        for idx, instr in enumerate(instructors):
+            results.append(await _sync_instructor_ics(instr, settings, cache))
+            if idx < len(instructors) - 1:
+                await asyncio.sleep(_ICS_FETCH_DELAY_SEC)  # be gentle on the ICS server
+        total = sum(r["events"] for r in results)
+        await db.app_settings.update_one(
+            {"key": "ics_sync_status"},
+            {"$set": {"key": "ics_sync_status", "running": False, "last_run": datetime.now(timezone.utc).isoformat(),
+                      "trigger": trigger, "synced": len(results), "total_events": total, "results": results}},
+            upsert=True,
+        )
+        return {"synced": len(results), "total_events": total, "results": results}
+    finally:
+        _ics_sync_running = False
+        await db.app_settings.update_one({"key": "ics_sync_status"}, {"$set": {"running": False}}, upsert=True)
+
+
+@api_router.get("/reservations/ics-status")
+async def get_ics_status(user: User = Depends(get_current_user)):
+    doc = await db.app_settings.find_one({"key": "ics_sync_status"}, {"_id": 0})
+    settings = await get_reservation_settings()
+    return {
+        "auto_sync": settings.get("ics_auto_sync", True),
+        "interval_minutes": settings.get("ics_sync_interval_minutes", 60),
+        "running": _ics_sync_running,
+        "status": doc,
+    }
+
+
 @api_router.post("/reservations/sync-ics")
 async def sync_ics(request: Request, user: User = Depends(get_admin_user)):
-    """Sync drives from instructors' ICS calendar feeds. Body: {instructor_id?: str}."""
+    """Trigger ICS sync. Full sync (no instructor_id) runs in background; poll /ics-status.
+    Body: {instructor_id?: str}."""
     try:
         body = await request.json()
     except Exception:
         body = {}
     instructor_id = body.get("instructor_id")
-    query = {"instructor_id": instructor_id} if instructor_id else {}
-    instructors = await db.instructors.find(query, {"_id": 0}).to_list(500)
-    instructors = [i for i in instructors if i.get("ics_url")]
-    if not instructors:
+
+    if instructor_id:
+        instr = await db.instructors.find_one({"instructor_id": instructor_id}, {"_id": 0})
+        if not instr or not instr.get("ics_url"):
+            raise HTTPException(status_code=400, detail="Instruktor nemá nastavený ICS odkaz")
+        settings = await get_reservation_settings()
+        res = await _sync_instructor_ics(instr, settings, {})
+        return {"synced": 1, "total_events": res["events"], "results": [res]}
+
+    # full sync -> background
+    if _ics_sync_running:
+        return {"started": False, "running": True, "message": "Synchronizace už probíhá"}
+    any_url = await db.instructors.count_documents({"ics_url": {"$nin": [None, ""]}})
+    if not any_url:
         raise HTTPException(status_code=400, detail="Žádný instruktor nemá nastavený ICS odkaz")
-    settings = await get_reservation_settings()
-    cache = {}
-    results = []
-    for instr in instructors:
-        results.append(await _sync_instructor_ics(instr, settings, cache))
-    total = sum(r["events"] for r in results)
-    return {"synced": len(results), "total_events": total, "results": results}
+    asyncio.create_task(_run_full_ics_sync("manual"))
+    return {"started": True, "running": True, "message": "Synchronizace spuštěna"}
+
+
+async def ics_auto_sync_loop():
+    """Background task: periodically sync ICS calendars."""
+    await asyncio.sleep(25)  # let startup settle
+    while True:
+        interval = 60
+        try:
+            settings = await get_reservation_settings()
+            interval = max(5, int(settings.get("ics_sync_interval_minutes", 60)))
+            if settings.get("ics_auto_sync", True):
+                summary = await _run_full_ics_sync(trigger="auto")
+                logger.info("Auto ICS sync: %d instructors, %d events", summary["synced"], summary["total_events"])
+        except Exception as e:
+            logger.error("Auto ICS sync error: %s", e)
+        await asyncio.sleep(interval * 60)
+
+
 
 
 
@@ -3215,7 +3290,8 @@ async def startup_tasks():
     try:
         await seed_admin()
         await start_teltonika_server()
-        logger.info("Startup complete: admin seeded, Teltonika TCP started")
+        asyncio.create_task(ics_auto_sync_loop())
+        logger.info("Startup complete: admin seeded, Teltonika TCP started, ICS auto-sync scheduled")
     except Exception as e:
         logger.error("Startup error: %s", e)
 

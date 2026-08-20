@@ -20,6 +20,7 @@ export default function ReservationReport() {
   const [drives, setDrives] = useState([]);
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [icsStatus, setIcsStatus] = useState(null);
 
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -37,6 +38,13 @@ export default function ReservationReport() {
     try {
       const res = await axios.get(`${API}/reservations/batches`, { withCredentials: true });
       setBatches(res.data);
+    } catch { /* ignore */ }
+  }, []);
+
+  const fetchIcsStatus = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API}/reservations/ics-status`, { withCredentials: true });
+      setIcsStatus(res.data);
     } catch { /* ignore */ }
   }, []);
 
@@ -58,7 +66,7 @@ export default function ReservationReport() {
     }
   }, [dateFrom, dateTo, vehicleId, onlyExceeded]);
 
-  useEffect(() => { fetchVehicles(); fetchBatches(); }, [fetchVehicles, fetchBatches]);
+  useEffect(() => { fetchVehicles(); fetchBatches(); fetchIcsStatus(); }, [fetchVehicles, fetchBatches, fetchIcsStatus]);
   useEffect(() => { fetchDrives(); }, [fetchDrives]);
 
   const handleImport = async () => {
@@ -86,11 +94,28 @@ export default function ReservationReport() {
     setSyncing(true);
     try {
       const res = await axios.post(`${API}/reservations/sync-ics`, {}, { withCredentials: true });
-      const errs = (res.data.results || []).filter((r) => r.error);
-      toast.success(`Synchronizováno ${res.data.total_events} jízd z ${res.data.synced} kalendářů`);
-      if (errs.length) toast.error(`Chyby: ${errs.map((e) => `${e.instructor}: ${e.error}`).join(", ")}`);
+      if (res.data.started === false && res.data.running) {
+        toast.info("Synchronizace už probíhá");
+      } else {
+        toast.info("Synchronizace kalendářů spuštěna…");
+      }
+      // poll status until finished
+      let done = false;
+      for (let i = 0; i < 40 && !done; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const st = await axios.get(`${API}/reservations/ics-status`, { withCredentials: true });
+        setIcsStatus(st.data);
+        if (!st.data.running) {
+          done = true;
+          const s = st.data.status || {};
+          const errs = (s.results || []).filter((r) => r.error);
+          toast.success(`Synchronizováno ${s.total_events ?? 0} jízd z ${s.synced ?? 0} kalendářů`);
+          if (errs.length) toast.error(`Chyby: ${errs.map((e) => `${e.instructor}: ${e.error}`).join(", ")}`);
+        }
+      }
       fetchBatches();
       fetchDrives();
+      fetchIcsStatus();
     } catch (err) {
       toast.error(err.response?.data?.detail || "Synchronizace se nezdařila");
     } finally {
@@ -157,6 +182,12 @@ export default function ReservationReport() {
               <div className="flex-1">
                 <p className="text-sm font-semibold text-[#18181B] flex items-center gap-1.5"><CalendarPlus size={16} weight="duotone" /> Synchronizace z kalendáře (ICS)</p>
                 <p className="text-xs text-[#71717A] mt-0.5">Načte aktuální jízdy z kalendářů učitelů (ICS odkaz nastavíte u instruktora).</p>
+                {icsStatus && (
+                  <p className="text-[11px] text-[#A1A1AA] mt-1">
+                    {icsStatus.auto_sync ? `Automaticky každých ${icsStatus.interval_minutes} min` : "Automatická synchronizace vypnutá"}
+                    {icsStatus.status?.last_run && ` · naposledy ${new Date(icsStatus.status.last_run).toLocaleString("cs-CZ", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`}
+                  </p>
+                )}
               </div>
               <Button onClick={handleSyncIcs} disabled={syncing} data-testid="sync-ics-btn">
                 <ArrowClockwise size={16} weight="bold" className="mr-1" /> {syncing ? "Synchronizuji…" : "Synchronizovat kalendáře"}

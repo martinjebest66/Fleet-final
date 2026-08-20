@@ -17,7 +17,8 @@ const INITIAL_FORM = {
   vin: "",
   odometer: 0,
   fuel_type: "benzín",
-  assigned_instructor_id: ""
+  assigned_instructor_id: "",
+  reservation_alias: ""
 };
 
 export default function Vehicles() {
@@ -94,7 +95,8 @@ export default function Vehicles() {
       vin: vehicle.vin || "",
       odometer: vehicle.odometer,
       fuel_type: vehicle.fuel_type,
-      assigned_instructor_id: vehicle.assigned_instructor_id || ""
+      assigned_instructor_id: vehicle.assigned_instructor_id || "",
+      reservation_alias: vehicle.reservation_alias || ""
     });
     setShowModal(true);
   };
