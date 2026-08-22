@@ -17,6 +17,9 @@ prázdný a frontend volá relativní `/api/...`.
 
 ---
 
+> **Nasazujete na vlastní server?** Krok za krokem pro VPS s doménou a HTTPS
+> najdete v [deploy/DEPLOY.md](deploy/DEPLOY.md).
+
 ## Rychlý start (Docker)
 
 ```bash

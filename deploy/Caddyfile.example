@@ -1,0 +1,45 @@
+# Caddy na hostiteli terminuje TLS a předává na kontejner (127.0.0.1:8080).
+#
+#   sudo cp deploy/Caddyfile.example /etc/caddy/Caddyfile
+#   sudo nano /etc/caddy/Caddyfile          # doplňte svou doménu a e-mail
+#   sudo systemctl reload caddy
+#
+# Certifikát od Let's Encrypt si Caddy vyřídí i obnovuje sám; nic dalšího
+# nastavovat netřeba. Aby prohlížeč přijal session cookie, musí být
+# v .env COOKIE_SECURE=true.
+
+{
+	# E-mail pro Let's Encrypt (upozornění na vypršení certifikátu).
+	email vas@email.cz
+}
+
+# ZDE doplňte svoji doménu:
+fleet.example.cz {
+	encode zstd gzip
+
+	# Caddy sám posílá X-Forwarded-For i X-Forwarded-Proto, takže aplikace
+	# pozná, že klient přišel po HTTPS.
+	reverse_proxy 127.0.0.1:8080 {
+		# Reporty a importy nad delším obdobím chvíli trvají.
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	# Fotky dokladů a importy z Ruhaviku bývají několik MB.
+	request_body {
+		max_size 32MB
+	}
+
+	log {
+		output file /var/log/caddy/fleet.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+	}
+}
+
+# Pozor: port 5027/TCP pro Teltonika trackery přes Caddy NEVEDE — je to
+# surový TCP protokol, ne HTTP. Kontejner ho publikuje přímo a ve firewallu
+# musí zůstat otevřený.
