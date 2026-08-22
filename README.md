@@ -218,19 +218,51 @@ vede tak jako tak:
 
 | Zdroj | Co dává |
 |---|---|
-| GPS tracker | ujetá vzdálenost (AVL IO 16) a stav paliva (IO 48 / 390) |
+| Tachometr vozidla (CAN) | **skutečný stav tachometru** z palubní jednotky — `can.vehicle.mileage` |
+| GPS tracker | vzdálenost napočítaná zařízením a stav paliva |
 | Tankování | odečet tachometru z palubní desky |
 | Předávací protokol | odečet tachometru a stav palivoměru |
 | Kniha jízd | tachometr na konci jízdy |
 
-Tachometr k danému okamžiku = **poslední ručně zapsaný odečet** plus
-vzdálenost, kterou od té doby zaznamenal tracker. Takový údaj je vždy označen
-jako **odhad** a je u něj vidět, ze kterého záznamu vychází — nikdy se netváří
-jako odečet z palubní desky. Když k datu žádný záznam neexistuje, vrátí se
-prázdná hodnota, ne nula.
+**Pokud lokátor posílá `can.vehicle.mileage`** (skutečný tachometr přečtený
+přes CAN / OEM PID), použije se přímo — je to tentýž údaj, jaký je vidět na
+palubní desce, takže se nic nedopočítává a neoznačuje jako odhad.
+
+Když vozidlo tachometr nehlásí, spočítá se jako **poslední ručně zapsaný
+odečet** plus vzdálenost, kterou od té doby napočítal tracker. Takový údaj je
+vždy označen jako **odhad** a je u něj vidět, ze kterého záznamu vychází.
+Když k datu žádný záznam neexistuje, vrátí se prázdná hodnota, ne nula.
 
 Tracker po výměně začíná počítat od nuly; záporný přírůstek se nikdy
 neodečítá.
+
+### Které AVL ID nese tachometr
+
+Teltonika posílá číslované IO prvky, ne názvy — které číslo nese tachometr,
+závisí na modelu a na tom, jestli je připojený CAN adaptér. Výchozí mapování:
+
+| Parametr | AVL ID | Jednotka |
+|---|---|---|
+| `can.vehicle.mileage` | 389 (OBD OEM Total Mileage) | km |
+| `can.vehicle.mileage` | 87, 105 (CAN adaptér) | m |
+| `can.tracker.counted.mileage` | 16 (Total Odometer) | m |
+| `can.fuel.level` | 48, 89 | % |
+| `can.fuel.level.liters` | 390 (OBD OEM Fuel Level) | 0,1 l |
+
+Co konkrétní zařízení posílá, ukáže:
+
+```
+GET /api/gps/devices/{imei}/raw-io
+```
+
+Odpověď rozdělí prvky na `mapped` a `unmapped`. Když je tachometr mezi
+`unmapped`, přidejte jeho ID do `CAN_VEHICLE_MILEAGE_IO_IDS` — formát `id`
+u již známého ID, jinak `id:jednotka` (`m`, `km`, `l`, `dl`, `%`).
+Samotné neznámé ID se odmítne místo hádání jednotky: záměna metrů za
+kilometry by tachometr nafoukla tisíckrát.
+
+> FMB003 potřebuje pro OEM parametry firmware 03.27.07.Rev.562 nebo novější;
+> bez něj AVL 389/390 neposílá vůbec.
 
 API:
 

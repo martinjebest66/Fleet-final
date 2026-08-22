@@ -27,6 +27,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from teltonika import (
+    PARAM_FUEL_LEVEL_LITERS,
+    PARAM_FUEL_LEVEL_PERCENT,
+    PARAM_TRACKER_MILEAGE,
+    PARAM_VEHICLE_MILEAGE,
+)
 from trips import REPORT_TZ, local_date_of, timestamp_range_query, to_utc
 
 logger = logging.getLogger("fleet.vehicle_state")
@@ -36,16 +42,23 @@ SOURCE_FUEL = "fuel"
 SOURCE_HANDOVER = "handover"
 SOURCE_LOGBOOK = "logbook"
 SOURCE_GPS = "gps"
+#: The vehicle's own odometer, read over CAN / OEM PIDs and reported by the
+#: tracker as `can.vehicle.mileage`. Unlike the tracker's counted distance this
+#: *is* the dashboard reading, so it needs no extrapolation.
+SOURCE_CAN = "can"
 
 SOURCE_LABELS = {
     SOURCE_FUEL: "Tankování",
     SOURCE_HANDOVER: "Předávací protokol",
     SOURCE_LOGBOOK: "Kniha jízd",
     SOURCE_GPS: "GPS tracker",
+    SOURCE_CAN: "Tachometr vozidla (CAN)",
 }
 
-#: Readings whose odometer is a human-read dashboard value.
-DASHBOARD_SOURCES = (SOURCE_FUEL, SOURCE_HANDOVER, SOURCE_LOGBOOK)
+#: Readings whose odometer is the real vehicle odometer rather than an
+#: accumulated distance. A CAN/OEM reading counts here: it comes off the same
+#: instrument cluster a person would read.
+DASHBOARD_SOURCES = (SOURCE_CAN, SOURCE_FUEL, SOURCE_HANDOVER, SOURCE_LOGBOOK)
 
 #: Cap on GPS points scanned for one query, so a long period cannot pull the
 #: whole position history into memory.
@@ -81,11 +94,54 @@ def _reading(at: Optional[datetime], source: str, **fields) -> Optional[Dict[str
         "source_label": SOURCE_LABELS.get(source, source),
         "odometer_km": None,
         "fuel_level_percent": None,
+        "fuel_level_liters": None,
         "gps_odometer_km": None,
         "note": None,
     }
     reading.update(fields)
     return reading
+
+
+def _oem_mileage_km(obd: Dict[str, Any]) -> Optional[float]:
+    """Real odometer from a legacy `obd` block (documents written before the
+    canonical `can` block existed)."""
+    for key, scale in (("oem_total_mileage", 1.0), ("can_total_mileage", 0.001)):
+        value = obd.get(key)
+        if value:
+            try:
+                return float(value) * scale
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _fuel_percent(can: Dict[str, Any], obd: Dict[str, Any]) -> Optional[int]:
+    """Fuel level as a percentage, from whichever source reports one.
+
+    A level reported in litres is deliberately *not* converted: without the
+    tank size that would be a guess, and the earlier code showed the raw litre
+    value as a percentage.
+    """
+    value = can.get(PARAM_FUEL_LEVEL_PERCENT)
+    if value is None:
+        value = obd.get("fuel_level")
+    if value is None:
+        value = obd.get("can_fuel_level")
+    percent = _as_int(value)
+    if percent is None or not (0 <= percent <= 100):
+        return None
+    return percent
+
+
+def _fuel_liters(can: Dict[str, Any], obd: Dict[str, Any]) -> Optional[float]:
+    value = can.get(PARAM_FUEL_LEVEL_LITERS)
+    if value is None:
+        raw = obd.get("oem_fuel_level")
+        value = float(raw) * 0.1 if raw not in (None, "") else None
+    try:
+        return round(float(value), 1) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _as_int(value: Any) -> Optional[int]:
@@ -176,27 +232,49 @@ async def collect_readings(
     if include_gps:
         gps_query: Dict[str, Any] = {
             "vehicle_id": vehicle_id,
-            "obd": {"$exists": True},
+            "$or": [{"obd": {"$exists": True}}, {"can": {"$exists": True}}],
         }
         range_filter = timestamp_range_query("timestamp", lo, hi)
         if range_filter:
-            gps_query.update(range_filter)
+            # Two $or clauses cannot coexist at the top level.
+            gps_query = {"$and": [gps_query, range_filter]}
         cursor = db.vehicle_positions.find(
-            gps_query, {"_id": 0, "timestamp": 1, "obd": 1}
+            gps_query, {"_id": 0, "timestamp": 1, "obd": 1, "can": 1}
         ).sort("timestamp", 1)
         for doc in await cursor.to_list(gps_limit):
             obd = doc.get("obd") or {}
-            total_m = _as_int(obd.get("total_odometer"))
-            fuel = obd.get("oem_fuel_level")
-            if fuel is None:
-                fuel = obd.get("fuel_level")
-            if total_m is None and fuel is None:
+            can = doc.get("can") or {}
+            at = to_utc(doc.get("timestamp"))
+
+            # The real odometer, when the vehicle reports one, is a reading in
+            # its own right — not something to extrapolate from.
+            vehicle_km = can.get(PARAM_VEHICLE_MILEAGE)
+            if vehicle_km is None:
+                vehicle_km = _oem_mileage_km(obd)
+            if vehicle_km:
+                entry = _reading(
+                    at, SOURCE_CAN,
+                    odometer_km=_as_int(vehicle_km),
+                    fuel_level_percent=_fuel_percent(can, obd),
+                    fuel_level_liters=_fuel_liters(can, obd),
+                    note="odečet z palubní jednotky vozidla",
+                )
+                if entry:
+                    readings.append(entry)
+                continue
+
+            tracker_km = can.get(PARAM_TRACKER_MILEAGE)
+            if tracker_km is None:
+                total_m = _as_int(obd.get("total_odometer"))
+                tracker_km = total_m / 1000.0 if total_m is not None else None
+            fuel = _fuel_percent(can, obd)
+            if tracker_km is None and fuel is None and _fuel_liters(can, obd) is None:
                 continue
             entry = _reading(
-                to_utc(doc.get("timestamp")),
-                SOURCE_GPS,
-                gps_odometer_km=round(total_m / 1000.0, 1) if total_m is not None else None,
-                fuel_level_percent=_as_int(fuel),
+                at, SOURCE_GPS,
+                gps_odometer_km=round(tracker_km, 1) if tracker_km is not None else None,
+                fuel_level_percent=fuel,
+                fuel_level_liters=_fuel_liters(can, obd),
             )
             if entry:
                 readings.append(entry)
@@ -255,6 +333,7 @@ def state_at(readings: List[Dict[str, Any]], at: datetime) -> Dict[str, Any]:
                 is_estimate = True
 
     fuel = _last_before(readings, at, has_fuel)
+    fuel_liters = _last_before(readings, at, lambda r: r.get("fuel_level_liters") is not None)
     last_refuel = _last_before(readings, at, lambda r: r["source"] == SOURCE_FUEL)
 
     return {
@@ -267,6 +346,7 @@ def state_at(readings: List[Dict[str, Any]], at: datetime) -> Dict[str, Any]:
         "odometer_source_label": SOURCE_LABELS.get(source) if source else None,
         "odometer_recorded_at": recorded_at,
         "fuel_level_percent": fuel["fuel_level_percent"] if fuel else None,
+        "fuel_level_liters": fuel_liters["fuel_level_liters"] if fuel_liters else None,
         "fuel_source": fuel["source"] if fuel else None,
         "fuel_source_label": fuel["source_label"] if fuel else None,
         "fuel_recorded_at": fuel["at"] if fuel else None,
@@ -307,7 +387,7 @@ def daily_summary(readings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         bucket = by_day.setdefault(day, {
             "date": day, "odometer_km": None, "odometer_is_estimate": False,
             "odometer_from_reading": False,
-            "fuel_level_percent": None, "gps_odometer_km": None,
+            "fuel_level_percent": None, "fuel_level_liters": None, "gps_odometer_km": None,
             "readings": 0, "sources": set(),
         })
         bucket["readings"] += 1
@@ -328,6 +408,8 @@ def daily_summary(readings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         if reading["fuel_level_percent"] is not None:
             bucket["fuel_level_percent"] = reading["fuel_level_percent"]
+        if reading.get("fuel_level_liters") is not None:
+            bucket["fuel_level_liters"] = reading["fuel_level_liters"]
 
         if base_odo is not None:
             delta = 0.0

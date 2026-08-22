@@ -66,6 +66,12 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     return value or default
 
 
+def _env_list(name: str) -> List[str]:
+    """Comma-separated environment value as a list of trimmed entries."""
+    raw = os.environ.get(name) or ""
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -133,6 +139,24 @@ class Settings:
         self.teltonika_host: str = _env("TELTONIKA_TCP_HOST", "0.0.0.0")
         self.teltonika_port: int = _env_int("TELTONIKA_TCP_PORT", 5027)
         self.teltonika_idle_timeout: int = _env_int("TELTONIKA_IDLE_TIMEOUT_SEC", 900)
+
+        # Which AVL IO element carries which value depends on the tracker model
+        # and on whether a CAN adapter is fitted, so the mapping is
+        # configurable. Entries are `id` or `id:unit` (m, km, l, dl, %); a bare
+        # id is only accepted for IDs whose unit the application already knows.
+        #   CAN_VEHICLE_MILEAGE_IO_IDS=389,87       # real (dashboard) odometer
+        #   CAN_TRACKER_MILEAGE_IO_IDS=16           # distance counted by the device
+        #   CAN_FUEL_PERCENT_IO_IDS=48,89
+        #   CAN_FUEL_LITERS_IO_IDS=390
+        self.can_vehicle_mileage_io_ids: List[str] = _env_list("CAN_VEHICLE_MILEAGE_IO_IDS")
+        self.can_tracker_mileage_io_ids: List[str] = _env_list("CAN_TRACKER_MILEAGE_IO_IDS")
+        self.can_fuel_percent_io_ids: List[str] = _env_list("CAN_FUEL_PERCENT_IO_IDS")
+        self.can_fuel_liters_io_ids: List[str] = _env_list("CAN_FUEL_LITERS_IO_IDS")
+
+        # Nominal tank size, used only to show an OEM fuel level reported in
+        # litres as a percentage as well. Without it the litre value is shown
+        # as-is rather than converted with a made-up tank size.
+        self.default_tank_liters: int = _env_int("DEFAULT_TANK_LITERS", 0)
 
         # --- uploads ---
         self.max_upload_bytes: int = _env_int("MAX_UPLOAD_BYTES", 10 * 1024 * 1024)

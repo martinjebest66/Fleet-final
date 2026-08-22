@@ -21,7 +21,18 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from teltonika import TeltonikaTCPServer, build_avl_packet, build_imei_packet
+from teltonika import (
+    OBD_IO_MAP,
+    PARAM_FUEL_LEVEL_LITERS,
+    PARAM_FUEL_LEVEL_PERCENT,
+    PARAM_TRACKER_MILEAGE,
+    PARAM_VEHICLE_MILEAGE,
+    TeltonikaTCPServer,
+    build_avl_packet,
+    build_imei_packet,
+    build_param_io_map,
+    extract_vehicle_parameters,
+)
 import resend
 import asyncio
 import csv as csv_module
@@ -2631,6 +2642,14 @@ async def get_vehicle_position_history(
 
 teltonika_server = None
 
+# AVL IO id -> canonical parameter, with the deployment's overrides applied.
+PARAM_IO_MAP = build_param_io_map({
+    PARAM_VEHICLE_MILEAGE: settings.can_vehicle_mileage_io_ids,
+    PARAM_TRACKER_MILEAGE: settings.can_tracker_mileage_io_ids,
+    PARAM_FUEL_LEVEL_PERCENT: settings.can_fuel_percent_io_ids,
+    PARAM_FUEL_LEVEL_LITERS: settings.can_fuel_liters_io_ids,
+})
+
 
 async def on_teltonika_records(imei: str, records: list):
     """Persist AVL records received from a tracker.
@@ -2670,6 +2689,10 @@ async def on_teltonika_records(imei: str, records: list):
             continue
 
         obd = rec.get("obd") or {}
+        raw_io = (rec.get("io") or {}).get("io") or {}
+        # Canonical values (real odometer in km, fuel level in % / litres),
+        # independent of which AVL id this particular model uses for them.
+        can_params = extract_vehicle_parameters(raw_io, PARAM_IO_MAP)
         speed = gps.get("speed", 0)
         doc = {
             "vehicle_id": vehicle_id,
@@ -2686,7 +2709,9 @@ async def on_teltonika_records(imei: str, records: list):
         }
         if obd:
             doc["obd"] = {k: v["value"] for k, v in obd.items()}
-            latest_obd = (rec["timestamp"], obd)
+            latest_obd = (rec["timestamp"], obd, raw_io, can_params)
+        if can_params:
+            doc["can"] = can_params
         position_docs.append(doc)
 
     inserted = 0
@@ -2710,13 +2735,18 @@ async def on_teltonika_records(imei: str, records: list):
             raise
 
     if latest_obd:
-        timestamp, obd = latest_obd
+        timestamp, obd, raw_io, can_params = latest_obd
         await db.vehicle_obd.update_one(
             {"vehicle_id": vehicle_id},
             {"$set": {
                 "vehicle_id": vehicle_id,
                 "imei": imei,
                 "data": obd,
+                "can": can_params,
+                # One snapshot of the raw IO elements per vehicle (an upsert,
+                # so it cannot grow): without it there is no way to tell which
+                # AVL id a particular tracker actually uses for the odometer.
+                "raw_io": {str(k): v for k, v in raw_io.items()},
                 "timestamp": timestamp.isoformat(),
                 "updated_at": now.isoformat(),
             }},
@@ -2728,9 +2758,11 @@ async def on_teltonika_records(imei: str, records: list):
         {"$set": {"last_seen": now.isoformat(), "status": "online"}}
     )
 
+    mileage = (latest_obd[3] if latest_obd else {}).get(PARAM_VEHICLE_MILEAGE)
     logger.info(
-        "IMEI %s → vozidlo %s: %d pozic uloženo, %d duplicit, %d bez GPS fixu",
+        "IMEI %s → vozidlo %s: %d pozic uloženo, %d duplicit, %d bez GPS fixu%s",
         imei, vehicle_id, inserted, duplicates, skipped_no_fix,
+        f", tachometr {mileage:.0f} km" if mileage else "",
     )
 
 
@@ -2803,6 +2835,58 @@ async def delete_gps_device(device_id: str, user: User = Depends(get_admin_user)
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Zařízení nenalezeno")
     return {"message": "Zařízení odstraněno"}
+
+
+@api_router.get("/gps/devices/{imei}/raw-io")
+async def get_device_raw_io(imei: str, user: User = Depends(get_admin_user)):
+    """Every AVL IO element the tracker last sent, and how it was interpreted.
+
+    Which numbered element carries the odometer differs between models and
+    depends on whether a CAN adapter is fitted, so this shows the raw list
+    next to the mapping actually in use. If the real odometer is arriving
+    under an id the application does not know, it shows up here as
+    unrecognised and can be mapped with CAN_VEHICLE_MILEAGE_IO_IDS.
+    """
+    device = await db.gps_devices.find_one({"imei": imei}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Zařízení s tímto IMEI není registrováno")
+
+    snapshot = await db.vehicle_obd.find_one({"vehicle_id": device["vehicle_id"]}, {"_id": 0})
+    raw_io = (snapshot or {}).get("raw_io") or {}
+
+    mapped, unmapped = [], []
+    for io_id, value in sorted(raw_io.items(), key=lambda kv: int(kv[0])):
+        entry = PARAM_IO_MAP.get(int(io_id))
+        obd_entry = OBD_IO_MAP.get(int(io_id))
+        row = {
+            "io_id": int(io_id),
+            "raw_value": value,
+            "parameter": entry[0] if entry else None,
+            "raw_unit": entry[1] if entry else (obd_entry[1] if obd_entry else None),
+            "obd_name": obd_entry[0] if obd_entry else None,
+        }
+        (mapped if entry else unmapped).append(row)
+
+    return {
+        "imei": imei,
+        "vehicle_id": device["vehicle_id"],
+        "last_seen": (snapshot or {}).get("timestamp"),
+        "parameters": (snapshot or {}).get("can") or {},
+        # Elements the app turns into a canonical parameter (odometer, fuel).
+        "mapped": mapped,
+        # Everything else the device sends. `obd_name` is set when the value is
+        # still understood as a diagnostic reading, just not as odometer/fuel.
+        "unmapped": unmapped,
+        "configured_mapping": {
+            str(io_id): {"parameter": param, "unit": unit}
+            for io_id, (param, unit) in sorted(PARAM_IO_MAP.items())
+        },
+        "hint": (
+            "Pokud tachometr chybí, najděte jeho AVL ID v seznamu 'unmapped' "
+            "a přidejte ho do CAN_VEHICLE_MILEAGE_IO_IDS (formát 'id' nebo 'id:jednotka', "
+            "např. 389 nebo 1176:km)."
+        ),
+    }
 
 
 @api_router.get("/gps/tcp-status")

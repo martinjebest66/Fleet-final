@@ -11,6 +11,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import { format, subDays } from "date-fns";
 
 const SOURCE_STYLES = {
+  can: "bg-indigo-100 text-indigo-700",
   gps: "bg-blue-100 text-blue-700",
   fuel: "bg-emerald-100 text-emerald-700",
   handover: "bg-violet-100 text-violet-700",
@@ -117,6 +118,7 @@ export function VehicleStateModal({ open, onOpenChange, vehicle }) {
                     {state.odometer_is_estimate
                       ? `Odhad: poslední odečet ${state.odometer_source_label?.toLowerCase()} + ${state.odometer_gps_delta_km} km podle GPS`
                       : `Odečet — ${state.odometer_source_label}`}
+                    {state.odometer_source === "can" && " (přímo z vozidla)"}
                     {state.odometer_recorded_at &&
                       ` (${new Date(state.odometer_recorded_at).toLocaleDateString("cs-CZ")})`}
                   </p>
@@ -128,8 +130,15 @@ export function VehicleStateModal({ open, onOpenChange, vehicle }) {
                   <GasPump size={16} weight="duotone" />Palivo k {new Date(at).toLocaleDateString("cs-CZ")}
                 </p>
                 <p className="text-3xl font-bold text-[#18181B]" data-testid="vehicle-state-fuel">
-                  {state.fuel_level_percent != null ? `${state.fuel_level_percent} %` : "—"}
+                  {state.fuel_level_percent != null
+                    ? `${state.fuel_level_percent} %`
+                    : state.fuel_level_liters != null
+                      ? `${state.fuel_level_liters} l`
+                      : "—"}
                 </p>
+                {state.fuel_level_percent != null && state.fuel_level_liters != null && (
+                  <p className="text-sm text-[#52525B]">{state.fuel_level_liters} l</p>
+                )}
                 <p className="text-xs text-[#52525B] mt-1">
                   {state.fuel_source_label
                     ? `Zdroj: ${state.fuel_source_label}${state.fuel_recorded_at ? ` (${new Date(state.fuel_recorded_at).toLocaleString("cs-CZ")})` : ""}`
