@@ -175,6 +175,10 @@ class Settings:
         # tracker data, so they stay off unless explicitly enabled.
         self.allow_mock_data: bool = _env_bool("ALLOW_MOCK_DATA", not self.is_production)
         self.ics_auto_sync_enabled: bool = _env_bool("ICS_AUTO_SYNC", True)
+        # Positions arriving from trackers are turned into trips on a schedule.
+        # Without this they only became trips when somebody pressed a button.
+        self.trip_detection_enabled: bool = _env_bool("TRIP_DETECTION_ENABLED", True)
+        self.trip_detection_interval_sec: int = _env_int("TRIP_DETECTION_INTERVAL_SEC", 600)
         self.ics_allow_private_hosts: bool = _env_bool("ICS_ALLOW_PRIVATE_HOSTS", False)
 
         # --- rate limiting ---

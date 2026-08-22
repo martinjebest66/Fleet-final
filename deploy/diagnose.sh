@@ -117,8 +117,18 @@ timeout 5 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/5027' 2>/dev/null \
   || echo "    !! port 5027 NEODPOVÍDÁ na 127.0.0.1"
 echo "  firewall:"
 sudo ufw status 2>/dev/null | grep -E '5027|Status' | sed 's/^/    /' || echo "    (ufw nedostupné)"
-echo "  veřejná IP tohoto serveru: $(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo '?')"
-echo "    -> tuhle adresu a port 5027/TCP musí mít nastavenou tracker"
+# Trackery jsou prakticky vždy jen IPv4, takže se ptáme cíleně na IPv4 —
+# `curl ifconfig.me` bez -4 klidně vrátí IPv6 adresu, na kterou se tracker
+# nepřipojí.
+ipv4="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null)"
+ipv6="$(curl -6 -s --max-time 5 ifconfig.me 2>/dev/null)"
+echo "  veřejná IPv4: ${ipv4:-žádná}"
+[ -n "$ipv6" ] && echo "  veřejná IPv6: $ipv6 (trackery ji zpravidla nepodporují)"
+if [ -n "$ipv4" ]; then
+    echo "    -> do trackeru patří tato IPv4 (nebo doména, která na ni míří) a port 5027/TCP"
+else
+    echo "    !! Server nemá veřejnou IPv4. Teltonika se na IPv6 zpravidla nepřipojí."
+fi
 
 hr "Log: neznámá IMEI a chyby"
 docker compose logs --tail 2000 app 2>/dev/null | grep -E "Neznámé IMEI|Tracker connected|Invalid packet|CRITICAL|ERROR" \

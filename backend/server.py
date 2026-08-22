@@ -7,7 +7,7 @@ import io
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
@@ -2679,9 +2679,14 @@ async def on_teltonika_records(imei: str, records: list):
         gps = rec.get("gps") or {}
         lat, lng = gps.get("lat"), gps.get("lng")
 
-        # A tracker without a fix reports 0/0 with zero satellites; storing it
-        # would drag every route to the Gulf of Guinea.
-        if lat is None or lng is None or (lat == 0.0 and lng == 0.0) or gps.get("satellites", 0) == 0:
+        # A tracker without a fix reports 0/0; storing that would drag every
+        # route to the Gulf of Guinea. Coordinates are the test — a satellite
+        # count of zero is *not*: Teltonika emits records on events (ignition,
+        # periodic wake) carrying the last known position while the GNSS module
+        # is asleep or indoors. Discarding those threw away real positions
+        # together with the odometer and ignition data attached to them.
+        satellites = gps.get("satellites", 0) or 0
+        if lat is None or lng is None or (lat == 0.0 and lng == 0.0):
             skipped_no_fix += 1
             continue
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
@@ -2701,7 +2706,10 @@ async def on_teltonika_records(imei: str, records: list):
             "speed": speed,
             "heading": gps.get("angle", 0),
             "altitude": gps.get("altitude", 0),
-            "satellites": gps.get("satellites", 0),
+            "satellites": satellites,
+            # False = position carried over from the last fix, not freshly
+            # measured. Kept, but distinguishable.
+            "gps_fix": satellites > 0,
             "ignition": bool(obd.get("ignition", {}).get("value", speed > 0)),
             "source": trips_service.SOURCE_TELTONIKA,
             "imei": imei,
@@ -2760,7 +2768,7 @@ async def on_teltonika_records(imei: str, records: list):
 
     mileage = (latest_obd[3] if latest_obd else {}).get(PARAM_VEHICLE_MILEAGE)
     logger.info(
-        "IMEI %s → vozidlo %s: %d pozic uloženo, %d duplicit, %d bez GPS fixu%s",
+        "IMEI %s → vozidlo %s: %d pozic uloženo, %d duplicit, %d bez souřadnic%s",
         imei, vehicle_id, inserted, duplicates, skipped_no_fix,
         f", tachometr {mileage:.0f} km" if mileage else "",
     )
@@ -3033,58 +3041,143 @@ def _build_trip_doc(vehicle_id: str, trip_start: dict, trip_points: list) -> tup
     }, distance
 
 
-@api_router.post("/gps/detect-trips/{vehicle_id}")
-async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_current_user)):
-    """Detect trips from position history using ignition on/off transitions."""
-    vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
-    if not vehicle:
-        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+#: A gap this long between two positions ends a drive even without an
+#: ignition-off record — trackers miss the last record often enough that
+#: otherwise two days of driving merge into one endless trip.
+TRIP_MAX_GAP_MINUTES = 20
+
+#: How far back a scheduled run re-examines positions, so a drive that was
+#: still in progress at the previous run is picked up once it finishes.
+TRIP_DETECTION_OVERLAP_HOURS = 6
+
+
+async def _detect_trips_for_vehicle(vehicle_id: str, since: Optional[datetime] = None) -> dict:
+    """Turn a vehicle's stored positions into trips.
+
+    Splits on ignition going off and on a long gap between positions. Every
+    candidate is checked against what is already stored, so running this
+    repeatedly — which the scheduler does — cannot multiply a drive.
+    """
+    query: Dict[str, Any] = {"vehicle_id": vehicle_id}
+    if since is not None:
+        range_filter = trips_service.timestamp_range_query("timestamp", since, None)
+        if range_filter:
+            query.update(range_filter)
 
     positions = await db.vehicle_positions.find(
-        {"vehicle_id": vehicle_id}, {"_id": 0}
+        query, {"_id": 0, "lat": 1, "lng": 1, "speed": 1, "ignition": 1, "timestamp": 1}
     ).sort("timestamp", 1).to_list(50000)
 
     if len(positions) < 2:
-        return {"message": "Nedostatek dat pro detekci jízd", "trips": 0}
+        return {"trips": 0, "skipped_existing": 0, "positions": len(positions)}
 
     trips_created = 0
     trips_skipped = 0
     trip_start = None
-    trip_points = []
+    trip_points: List[dict] = []
+    previous_at = None
 
-    for pos in positions:
-        ts = pos.get("timestamp")
-        if isinstance(ts, str):
-            ts = datetime.fromisoformat(ts)
-        ignition = pos.get("ignition", pos.get("speed", 0) > 0)
-
-        if ignition and trip_start is None:
-            trip_start = {"time": ts, "lat": pos["lat"], "lng": pos["lng"]}
-            trip_points = [pos]
-        elif ignition and trip_start is not None:
-            trip_points.append(pos)
-        elif not ignition and trip_start is not None and len(trip_points) >= 2:
+    async def close_trip() -> None:
+        nonlocal trips_created, trips_skipped, trip_start, trip_points
+        if trip_start is not None and len(trip_points) >= 2:
             trip_doc, distance = _build_trip_doc(vehicle_id, trip_start, trip_points)
             if distance >= 100:
-                # Re-running detection must not multiply the same drive.
                 existing = await trips_service.find_duplicate_trip(db, trip_doc)
                 if existing:
                     trips_skipped += 1
                 else:
                     await db.gps_trips.insert_one(trip_doc)
                     trips_created += 1
-            trip_start = None
-            trip_points = []
+        trip_start = None
+        trip_points = []
+
+    for pos in positions:
+        at = trips_service.to_utc(pos.get("timestamp"))
+        if at is None:
+            continue
+        ignition = pos.get("ignition", (pos.get("speed", 0) or 0) > 0)
+
+        # A long silence ends the drive even if the ignition-off record never
+        # arrived (tracker out of signal, battery pulled, records dropped).
+        if (previous_at is not None and trip_start is not None
+                and (at - previous_at).total_seconds() > TRIP_MAX_GAP_MINUTES * 60):
+            await close_trip()
+        previous_at = at
+
+        if ignition and trip_start is None:
+            trip_start = {"time": at, "lat": pos["lat"], "lng": pos["lng"]}
+            trip_points = [pos]
+        elif ignition:
+            trip_points.append(pos)
+        elif trip_start is not None:
+            await close_trip()
+
+    # A drive left open at the end of the data: close it once the last position
+    # is older than the gap threshold, because then the vehicle plainly is not
+    # still driving — the tracker simply never sent the ignition-off record.
+    # A genuinely in-progress drive (recent last position) stays open and is
+    # picked up by the next run thanks to the overlap.
+    if trip_start is not None and previous_at is not None:
+        idle = datetime.now(timezone.utc) - previous_at
+        if idle > timedelta(minutes=TRIP_MAX_GAP_MINUTES):
+            await close_trip()
+
+    return {"trips": trips_created, "skipped_existing": trips_skipped,
+            "positions": len(positions)}
+
+
+@api_router.post("/gps/detect-trips/{vehicle_id}")
+async def detect_trips_from_positions(vehicle_id: str, user: User = Depends(get_current_user)):
+    """Detect trips from a vehicle's whole position history (manual run)."""
+    vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+
+    result = await _detect_trips_for_vehicle(vehicle_id)
+    if result["positions"] < 2:
+        return {"message": "Nedostatek dat pro detekci jízd", "trips": 0}
 
     logger.info(
         "Detekce jízd pro vozidlo %s: %d nových, %d již existovalo",
-        vehicle_id, trips_created, trips_skipped,
+        vehicle_id, result["trips"], result["skipped_existing"],
     )
     return {
-        "message": f"Detekováno {trips_created} jízd ({trips_skipped} již existovalo)",
-        "trips": trips_created,
-        "skipped_existing": trips_skipped,
+        "message": f"Detekováno {result['trips']} jízd ({result['skipped_existing']} již existovalo)",
+        "trips": result["trips"],
+        "skipped_existing": result["skipped_existing"],
     }
+
+
+async def trip_detection_loop():
+    """Turn incoming tracker positions into trips, without anyone clicking.
+
+    Positions used to become trips only when somebody pressed a button, so a
+    fleet could stream GPS data for weeks and still report zero drives — the
+    logbook and every trip report stayed empty. This closes that gap.
+    """
+    await asyncio.sleep(45)  # let startup settle
+    interval = max(60, settings.trip_detection_interval_sec)
+    while True:
+        try:
+            if settings.trip_detection_enabled:
+                since = datetime.now(timezone.utc) - timedelta(hours=TRIP_DETECTION_OVERLAP_HOURS)
+                vehicle_ids = await db.vehicle_positions.distinct(
+                    "vehicle_id", trips_service.timestamp_range_query("timestamp", since, None) or {}
+                )
+                total_new = 0
+                for vehicle_id in vehicle_ids:
+                    result = await _detect_trips_for_vehicle(vehicle_id, since=since)
+                    total_new += result["trips"]
+                if total_new:
+                    logger.info(
+                        "Automatická detekce jízd: %d nových jízd u %d vozidel",
+                        total_new, len(vehicle_ids),
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Automatická detekce jízd selhala")
+        await asyncio.sleep(interval)
 
 
 def _haversine(lat1, lng1, lat2, lng2):
@@ -4499,6 +4592,7 @@ async def startup_tasks():
         )
 
     _background_tasks.append(asyncio.create_task(ics_auto_sync_loop()))
+    _background_tasks.append(asyncio.create_task(trip_detection_loop()))
     logger.info("Start dokončen — API je připraveno.")
 
 
