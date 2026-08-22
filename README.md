@@ -17,6 +17,9 @@ prázdný a frontend volá relativní `/api/...`.
 
 ---
 
+> **Nasazujete na vlastní server?** Krok za krokem pro VPS s doménou a HTTPS
+> najdete v [deploy/DEPLOY.md](deploy/DEPLOY.md).
+
 ## Rychlý start (Docker)
 
 ```bash
@@ -30,7 +33,23 @@ docker compose up -d --build
 docker compose logs -f app
 ```
 
-Aplikace poběží na `http://<server>/`, health check na `http://<server>/api/health`.
+Aplikace poslouchá na **`127.0.0.1:8080`** — tedy jen na loopbacku. Před ni
+patří reverzní proxy na hostiteli (Caddy, Nginx, Traefik), která terminuje TLS.
+Ověření zevnitř serveru:
+
+```bash
+curl -s http://127.0.0.1:8080/api/health
+```
+
+Pokud reverzní proxy nemáte a chcete kontejner vystavit přímo, nastavte v `.env`:
+
+```env
+HTTP_BIND=0.0.0.0
+HTTP_PORT=80
+```
+
+Port trackerů `5027/TCP` zůstává na veřejném rozhraní — Teltonika se připojuje
+z mobilní sítě, loopback by GPS data tiše zastavil.
 
 > **Pozor:** `docker compose down -v` smaže volume `mongo_data`, tedy celou
 > databázi (vozidla, kniha jízd, GPS historie). Na produkčním serveru ho
@@ -66,7 +85,10 @@ Všechny proměnné jsou popsané v [`.env.example`](.env.example). Nejdůležit
 | `COOKIE_SAMESITE` | `lax` | `none` jen při frontendu na jiné doméně (vyžaduje `COOKIE_SECURE=true`) |
 | `CORS_ORIGINS` | prázdné | seznam originů; prázdné = same-origin, middleware se vůbec nepřidá |
 | `REACT_APP_BACKEND_URL` | prázdné | build-time; prázdné = relativní `/api` |
-| `TELTONIKA_TCP_PORT` | `5027` | port TCP přijímače GPS trackerů |
+| `HTTP_BIND` / `HTTP_PORT` | `127.0.0.1` / `8080` | kde se publikuje web; `0.0.0.0` vystaví kontejner přímo |
+| `TELTONIKA_BIND` / `TELTONIKA_TCP_PORT` | `0.0.0.0` / `5027` | port TCP přijímače GPS trackerů |
+| `NODE_MAX_OLD_SPACE_MB` | `2048` | velikost Node heapu při buildu frontendu |
+| `APP_MEM_LIMIT` / `MONGO_MEM_LIMIT` | `1g` / `1g` | paměťové stropy běžících kontejnerů |
 | `ALLOW_MOCK_DATA` | `false` (v produkci) | generátory ukázkových GPS dat |
 | `ADMIN_PASSWORD_RESET_ON_START` | `false` | přepsat heslo admina při každém startu |
 | `ICS_ALLOW_PRIVATE_HOSTS` | `false` | povolit ICS kalendáře na interních adresách |
@@ -81,6 +103,30 @@ COOKIE_SAMESITE=lax
 ```
 
 Aplikace čte `X-Forwarded-Proto`; proxy ho musí posílat.
+
+### Paměť
+
+Build Reactu je nejnáročnější část nasazení. Webpack potřebuje výrazně víc než
+výchozí Node heap; na malém VPS build jinak skončí hláškou
+`JavaScript heap out of memory`, nebo ho zabije kernel a Docker ohlásí jen
+`exit code 137`. Velikost heapu je proto explicitní:
+
+```env
+NODE_MAX_OLD_SPACE_MB=1536   # 2 GB server
+NODE_MAX_OLD_SPACE_MB=2048   # výchozí, 4 GB server
+```
+
+Jednorázově i bez `.env`:
+
+```bash
+docker compose build --build-arg NODE_MAX_OLD_SPACE_MB=1536
+```
+
+Běžící kontejnery mají strop `APP_MEM_LIMIT` a `MONGO_MEM_LIMIT` (výchozí 1 GB
+každý). MongoDB si podle cgroup limitu sama zmenší WiredTiger cache, takže
+nezabere všechnu RAM. Na serveru s 1 GB RAM buildujte obraz jinde
+(`docker build` na silnějším stroji + `docker push`), místní build se tam
+nevejde.
 
 ### MongoDB
 
@@ -163,6 +209,96 @@ Jeden vadný řádek nikdy neshodí zbytek souboru.
 
 ---
 
+## Stav tachometru a paliva k datu
+
+Otázku „jaký stav tachometru a paliva mělo vozidlo k určitému datu?" zodpovídá
+tlačítko **Stav tachometru a paliva** na kartě vozidla. Po zvolení data se
+zobrazí odečet, graf vývoje za období a tabulka po dnech; u GPS jízdy se stav
+na začátku a na konci ukáže přímo v detailu trasy.
+
+Údaje se nikde neukládají podruhé — skládají se ze záznamů, které aplikace
+vede tak jako tak:
+
+| Zdroj | Co dává |
+|---|---|
+| Tachometr vozidla (CAN) | **skutečný stav tachometru** z palubní jednotky — `can.vehicle.mileage` |
+| GPS tracker | vzdálenost napočítaná zařízením a stav paliva |
+| Tankování | odečet tachometru z palubní desky |
+| Předávací protokol | odečet tachometru a stav palivoměru |
+| Kniha jízd | tachometr na konci jízdy |
+
+**Pokud lokátor posílá `can.vehicle.mileage`** (skutečný tachometr přečtený
+přes CAN / OEM PID), použije se přímo — je to tentýž údaj, jaký je vidět na
+palubní desce, takže se nic nedopočítává a neoznačuje jako odhad.
+
+Když vozidlo tachometr nehlásí, spočítá se jako **poslední ručně zapsaný
+odečet** plus vzdálenost, kterou od té doby napočítal tracker. Takový údaj je
+vždy označen jako **odhad** a je u něj vidět, ze kterého záznamu vychází.
+Když k datu žádný záznam neexistuje, vrátí se prázdná hodnota, ne nula.
+
+Tracker po výměně začíná počítat od nuly; záporný přírůstek se nikdy
+neodečítá.
+
+### Které AVL ID nese tachometr
+
+Teltonika posílá číslované IO prvky, ne názvy — které číslo nese tachometr,
+závisí na modelu a na tom, jestli je připojený CAN adaptér. Výchozí mapování:
+
+| Parametr | AVL ID | Jednotka |
+|---|---|---|
+| `can.vehicle.mileage` | 389 (OBD OEM Total Mileage) | km |
+| `can.vehicle.mileage` | 87, 105 (CAN adaptér) | m |
+| `can.tracker.counted.mileage` | 16 (Total Odometer) | m |
+| `can.fuel.level` | 48, 89 | % |
+| `can.fuel.level.liters` | 390 (OBD OEM Fuel Level) | 0,1 l |
+
+Co konkrétní zařízení posílá, ukáže:
+
+```
+GET /api/gps/devices/{imei}/raw-io
+```
+
+Odpověď rozdělí prvky na `mapped` a `unmapped`. Když je tachometr mezi
+`unmapped`, přidejte jeho ID do `CAN_VEHICLE_MILEAGE_IO_IDS` — formát `id`
+u již známého ID, jinak `id:jednotka` (`m`, `km`, `l`, `dl`, `%`).
+Samotné neznámé ID se odmítne místo hádání jednotky: záměna metrů za
+kilometry by tachometr nafoukla tisíckrát.
+
+> FMB003 potřebuje pro OEM parametry firmware 03.27.07.Rev.562 nebo novější;
+> bez něj AVL 389/390 neposílá vůbec.
+
+API:
+
+| Endpoint | Popis |
+|---|---|
+| `GET /api/vehicles/{id}/state?at=2026-08-20` | stav k okamžiku vč. původu údaje |
+| `GET /api/vehicles/{id}/state/history?date_from&date_to` | záznamy a denní přehled |
+| `GET /api/gps/trips/{id}/route` | trasa + stav na začátku a na konci jízdy |
+
+Hustý proud z trackeru se pro zobrazení prořezává (`max_points`); uložená data
+zůstávají kompletní.
+
+## Doklady k servisu a údržbě
+
+Ke každé položce údržby lze připojit vyfocené doklady — fakturu, protokol
+o STK, stránku ze servisní knihy, účtenku. Na telefonu otevře tlačítko
+**Vyfotit doklad** rovnou fotoaparát, takže doklad se dá pořídit na místě
+u servisu.
+
+Přijímají se obrázky (JPEG, PNG, WebP, HEIC/HEIF) a PDF do
+`MAX_UPLOAD_BYTES` (výchozí 10 MB). Ostatní typy se odmítnou.
+
+Binární data leží v samostatné kolekci `maintenance_documents`, v položce
+údržby zůstávají jen metadata. Seznam údržby proto zůstává malý i s desítkami
+fotek a nehrozí naražení na 16MB limit dokumentu v MongoDB. Smazání položky
+údržby smaže i její doklady.
+
+| Endpoint | Popis |
+|---|---|
+| `POST /api/maintenance/{id}/documents` | nahrání dokladu (`file`, `doc_type`, `label`) |
+| `GET /api/maintenance/documents/{doc_id}/file` | zobrazení / stažení dokladu |
+| `DELETE /api/maintenance/documents/{doc_id}` | smazání dokladu (admin) |
+
 ## Reportovací API
 
 | Endpoint | Popis |
@@ -237,6 +373,7 @@ backend/
   config.py       konfigurace z prostředí + kontroly produkčního nasazení
   database.py     připojení k MongoDB, čekání na start, indexy
   trips.py        jednotný model jízdy a reportovací vrstva
+  vehicle_state.py stav tachometru a paliva k datu (odvozený z ostatních záznamů)
   ruhavik.py      parsování Ruhavik exportů + idempotentní import
   teltonika.py    Codec 8 / 8E parser a TCP přijímač
   tests/          jednotkové a API testy

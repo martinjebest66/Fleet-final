@@ -94,7 +94,12 @@ export default function GPSTracking() {
         withCredentials: true,
         signal: controller.signal,
       })
-      .then((res) => setSelectedRoute({ points: res.data.points || [], loading: false }))
+      .then((res) => setSelectedRoute({
+        points: res.data.points || [],
+        stateStart: res.data.state_start,
+        stateEnd: res.data.state_end,
+        loading: false,
+      }))
       .catch((err) => {
         if (axios.isCancel(err) || err.name === "CanceledError") return;
         setSelectedRoute({ points: [], loading: false });
@@ -121,12 +126,16 @@ export default function GPSTracking() {
 
   useEffect(() => { if (tab === "live") fetchLivePositions(); }, [tab, fetchLivePositions]);
 
+  // Auto-refresh reloads the real tracker positions. It used to call the mock
+  // generator instead, which both wrote fabricated positions into the database
+  // every five seconds and — once the generator was disabled outside
+  // development — left the live map permanently stale.
   useEffect(() => {
     if (autoRefresh && tab === "live") {
-      intervalRef.current = setInterval(simulateAndFetch, 5000);
+      intervalRef.current = setInterval(fetchLivePositions, 15000);
     }
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [autoRefresh, tab, simulateAndFetch]);
+  }, [autoRefresh, tab, fetchLivePositions]);
 
   const handleImportMock = async (vehicleId) => {
     if (!vehicleId) { toast.error("Vyberte vozidlo"); return; }
@@ -214,6 +223,8 @@ export default function GPSTracking() {
 
       {tab === "live" && (
         <LiveMapTab
+          allowMockData={allowMockData}
+          refresh={fetchLivePositions}
           livePositions={livePositions}
           liveLoading={liveLoading}
           autoRefresh={autoRefresh}

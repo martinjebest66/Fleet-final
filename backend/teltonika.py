@@ -215,6 +215,124 @@ def _parse_avl_record(data: bytes, offset: int, codec_id: int):
     }, offset
 
 
+# ── Canonical vehicle parameters ───────────────────────────────
+#
+# Teltonika sends numbered AVL IO elements; which number carries which value
+# depends on the model and on whether a CAN adapter is fitted. Platforms
+# (flespi, Wialon) therefore normalise them to names, and device datasheets are
+# usually read through those names. The same names are used here so a value
+# seen as `can.vehicle.mileage` on the tracker side is called that here too.
+#
+# The distinction that matters for reporting:
+#
+#   can.vehicle.mileage          the vehicle's own odometer, read over CAN/OEM
+#                                PIDs — the number on the dashboard.
+#   can.tracker.counted.mileage  distance the tracker itself accumulated. Not
+#                                the dashboard reading: it starts at zero when
+#                                the device is installed or replaced.
+
+PARAM_VEHICLE_MILEAGE = "can.vehicle.mileage"
+PARAM_TRACKER_MILEAGE = "can.tracker.counted.mileage"
+PARAM_FUEL_LEVEL_PERCENT = "can.fuel.level"
+PARAM_FUEL_LEVEL_LITERS = "can.fuel.level.liters"
+
+#: Unit conversions into the canonical unit of each parameter
+#: (kilometres for mileage, percent/litres for fuel).
+UNIT_SCALE = {
+    "m": 0.001,      # metres -> km
+    "km": 1.0,
+    "l": 1.0,        # litres
+    "dl": 0.1,       # tenths of a litre (Teltonika multiplier 0.1) -> litres
+    "%": 1.0,
+}
+
+#: Default AVL ID -> (canonical parameter, unit of the raw value).
+#:
+#: Sources: Teltonika "Data Sending Parameters ID" tables and the flespi
+#: parameter mapping for these devices. Only IDs whose unit is documented are
+#: listed — an ID with a guessed unit could be wrong by a factor of 1000.
+DEFAULT_PARAM_IO_MAP = {
+    # Real (dashboard) odometer
+    389: (PARAM_VEHICLE_MILEAGE, "km"),   # OBD OEM Total Mileage — FMB003 with OEM PIDs
+    87:  (PARAM_VEHICLE_MILEAGE, "m"),    # Total Mileage — LV-CAN200 / ALL-CAN300 adapter
+    105: (PARAM_VEHICLE_MILEAGE, "m"),    # Total Mileage (counted) — CAN adapter
+    # Tracker's own accumulated distance
+    16:  (PARAM_TRACKER_MILEAGE, "m"),    # Total Odometer
+    # Fuel
+    48:  (PARAM_FUEL_LEVEL_PERCENT, "%"),  # Fuel Level, standard OBD PID 0x2F
+    89:  (PARAM_FUEL_LEVEL_PERCENT, "%"),  # Fuel Level — CAN adapter
+    390: (PARAM_FUEL_LEVEL_LITERS, "dl"),  # OBD OEM Fuel Level, multiplier 0.1 -> litres
+}
+
+
+def build_param_io_map(overrides: Optional[dict] = None) -> dict:
+    """Resolve the AVL ID -> parameter mapping, applying configured overrides.
+
+    `overrides` maps a canonical parameter name to a list of `id` or
+    `id:unit` entries. A bare id is only accepted when its unit is already
+    known, because assuming one would silently scale the value wrongly.
+    """
+    mapping = dict(DEFAULT_PARAM_IO_MAP)
+    for param, entries in (overrides or {}).items():
+        for entry in entries:
+            text = str(entry).strip()
+            if not text:
+                continue
+            if ":" in text:
+                raw_id, unit = text.split(":", 1)
+                unit = unit.strip().lower()
+            else:
+                raw_id, unit = text, None
+            try:
+                io_id = int(raw_id)
+            except ValueError:
+                logger.warning("Ignoring unparsable AVL id %r for %s", entry, param)
+                continue
+            if unit is None:
+                known = DEFAULT_PARAM_IO_MAP.get(io_id)
+                if not known:
+                    logger.warning(
+                        "AVL id %s for %s has no known unit — specify it as '%s:km' "
+                        "(or m/l/dl/%%), otherwise the value cannot be scaled safely.",
+                        io_id, param, io_id,
+                    )
+                    continue
+                unit = known[1]
+            if unit not in UNIT_SCALE:
+                logger.warning("Unknown unit %r for AVL id %s (%s)", unit, io_id, param)
+                continue
+            mapping[io_id] = (param, unit)
+    return mapping
+
+
+def extract_vehicle_parameters(io_values: dict, param_io_map: Optional[dict] = None) -> dict:
+    """Normalise raw IO elements into canonical parameters.
+
+    Returns e.g. ``{"can.vehicle.mileage": 132456.0, "can.fuel.level": 62}`` —
+    mileage always in kilometres, fuel level in percent and/or litres.
+    """
+    mapping = param_io_map or DEFAULT_PARAM_IO_MAP
+    out = {}
+    for io_id, value in io_values.items():
+        try:
+            io_id_int = int(io_id)
+        except (TypeError, ValueError):
+            continue
+        entry = mapping.get(io_id_int)
+        if not entry:
+            continue
+        param, unit = entry
+        if not isinstance(value, (int, float)):
+            continue
+        scaled = float(value) * UNIT_SCALE[unit]
+        # A device that has not yet read the value reports 0; that is "unknown",
+        # not "the odometer is at zero".
+        if param in (PARAM_VEHICLE_MILEAGE, PARAM_TRACKER_MILEAGE) and scaled <= 0:
+            continue
+        out[param] = round(scaled, 3)
+    return out
+
+
 # ── OBD-II IO element mapper ───────────────────────────────────
 
 # Known Teltonika FMB003 AVL IO IDs for OBD-II / vehicle data
@@ -242,9 +360,15 @@ OBD_IO_MAP = {
     # Movement & Ignition
     239: ("ignition", ""),               # Ignition (0/1)
     240: ("movement", ""),               # Movement (0/1)
-    # OEM (Codec 8 Extended)
-    390: ("oem_fuel_level", "%"),        # OEM Fuel Level
+    # OEM parameters read over the OBD port (FMB003 and relatives)
+    389: ("oem_total_mileage", "km"),    # OBD OEM Total Mileage — the real odometer
+    390: ("oem_fuel_level", "dl"),       # OBD OEM Fuel Level, multiplier 0.1 -> litres
+                                         # (previously labelled "%", which is a
+                                         # different quantity entirely)
     281: ("dtc_list", ""),               # DTC List (string/hex)
+    # CAN adapter (LV-CAN200 / ALL-CAN300)
+    87:  ("can_total_mileage", "m"),     # Total Mileage
+    89:  ("can_fuel_level", "%"),        # Fuel Level
 }
 
 

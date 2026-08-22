@@ -5,11 +5,22 @@
 ```
 Internet
    │
-   ├── :80  (HTTP)  → Nginx → React frontend + /api/ proxy → FastAPI (:8001)
+   ├── :443/:80 → reverzní proxy na hostiteli (TLS)
+   │                  └── 127.0.0.1:8080 → Nginx v kontejneru
+   │                            ├── React frontend
+   │                            └── /api → FastAPI (:8001)
    └── :5027 (TCP)  → Teltonika GPS tracker přímo na FastAPI
 ```
 
 Vše běží v jednom Docker kontejneru + MongoDB v druhém. Stačí `docker compose up`.
+
+Kontejner se publikuje jen na `127.0.0.1:8080`, takže z internetu není dosažitelný
+přímo — TLS terminuje proxy na hostiteli. Pokud proxy mít nechcete, nastavte
+v `.env` `HTTP_BIND=0.0.0.0` a `HTTP_PORT=80` (viz `deploy/setup-https.sh`).
+
+MongoDB nemá publikovaný port; je dostupná jen v interní Docker síti.
+V Azure Network Security Group tedy stačí otevřít **443/80** (proxy)
+a **5027/TCP** (GPS trackery) — nikdy 27017.
 
 ---
 

@@ -23,9 +23,19 @@ ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
 # CI treats warnings as errors in create-react-app builds; keep them visible
 # without failing the image build on a lint warning.
 ENV CI=false
+# Source maps roughly double the peak memory and disk of the build and are not
+# shipped anyway.
 ENV GENERATE_SOURCEMAP=false
+# Webpack needs considerably more than Node's default heap for this bundle.
+# Without an explicit ceiling the build dies on a small VPS with
+# "JavaScript heap out of memory", or the kernel OOM-kills it and Docker
+# reports a bare "exit code 137". Override at build time:
+#   docker compose build --build-arg NODE_MAX_OLD_SPACE_MB=1536
+ARG NODE_MAX_OLD_SPACE_MB=2048
+ENV NODE_OPTIONS="--max-old-space-size=${NODE_MAX_OLD_SPACE_MB}"
 
-RUN yarn build
+RUN node -e "console.log('Node heap limit (MB):', Math.round(require('v8').getHeapStatistics().heap_size_limit / 1048576))" \
+    && yarn build
 
 # --- Stage 2: production image ---
 FROM python:3.11-slim

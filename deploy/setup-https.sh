@@ -1,7 +1,14 @@
 #!/bin/bash
 # ============================================
 # Let's Encrypt HTTPS setup pro Fleet Manager
-# Spustit na Azure VM po prvním nasazení
+#
+# POZOR: tento skript řeší variantu, kdy TLS terminuje Nginx UVNITŘ
+# kontejneru. Výchozí nasazení to nepotřebuje — kontejner poslouchá jen na
+# 127.0.0.1:8080 a TLS terminuje reverzní proxy na hostiteli (Caddy, Nginx,
+# Traefik). Tam stačí v .env nastavit COOKIE_SECURE=true a tento skript
+# nespouštět.
+#
+# Použijte ho jen tehdy, když žádnou proxy na hostiteli mít nechcete.
 # ============================================
 set -e
 
@@ -60,15 +67,50 @@ server {
     root /var/www/html;
     index index.html;
 
-    # API proxy
-    location /api/ {
+    client_max_body_size 32M;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/javascript application/javascript
+               application/json application/xml image/svg+xml;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "same-origin" always;
+    server_tokens off;
+
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8001/api/health;
+        proxy_set_header Host \$host;
+        access_log off;
+    }
+
+    # `location /api` without the trailing slash also matches a bare /api
+    # request; with /api/ only, that request fell through to the SPA fallback.
+    location /api {
         proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_read_timeout 120s;
-        client_max_body_size 20M;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+    }
+
+    location /static/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files \$uri =404;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        expires off;
     }
 
     # SPA fallback
@@ -87,11 +129,13 @@ echo ""
 echo "   volumes:"
 echo "     - /etc/letsencrypt:/etc/letsencrypt:ro"
 echo ""
-echo "2. Přidejte port 443:"
-echo "   ports:"
-echo "     - \"80:80\""
+echo "2. Vystavte kontejner přímo (výchozí je jen loopback) — v .env:"
+echo "     HTTP_BIND=0.0.0.0"
+echo "     HTTP_PORT=80"
+echo "     COOKIE_SECURE=true      # bez toho prohlížeč zahodí session cookie"
+echo ""
+echo "   a v docker-compose.yml doplňte do ports mapování pro 443:"
 echo "     - \"443:443\""
-echo "     - \"5027:5027\""
 echo ""
 echo "3. Přejmenujte nginx-https.conf:"
 echo "   cp deploy/nginx-https.conf deploy/nginx.conf"
