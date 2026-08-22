@@ -102,7 +102,12 @@ COOKIE_SECURE=true
 COOKIE_SAMESITE=lax
 ```
 
-Aplikace čte `X-Forwarded-Proto`; proxy ho musí posílat.
+`COOKIE_SECURE=true` přidá session cookie atribut `Secure`, takže ji prohlížeč
+nikdy nepošle nešifrovaně. Přes HTTPS aplikace funguje i bez něj, jen je to
+zbytečné riziko; naopak zapnutý **bez** HTTPS cookie zabije — přihlášení
+projde a všechno další skončí 401.
+
+Aplikace čte `X-Forwarded-Proto`; proxy ho musí posílat (Caddy to dělá sám).
 
 ### Paměť
 

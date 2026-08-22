@@ -256,7 +256,7 @@ takže data skončí tam, kam se aplikace dívá.
 | Kontejner se nespustí | `docker compose logs app` — konfigurační chyby se vypisují jako CRITICAL |
 | Build skončí `exit code 137` | Málo paměti: zkontrolujte swap (krok 1), snižte `NODE_MAX_OLD_SPACE_MB` na 1024 |
 | Web hlásí 502 | Kontejner neběží nebo neposlouchá: `docker compose ps`, `curl 127.0.0.1:8080/api/health` |
-| Přihlášení projde, ale data se nenačtou | Chybí `COOKIE_SECURE=true` při HTTPS — prohlížeč cookie zahodí |
+| Přihlášení projde, ale data se nenačtou | `COOKIE_SECURE=true` **bez** HTTPS: prohlížeč cookie zahodí a každý další požadavek skončí 401. Přes HTTPS naopak funguje i bez něj (jen je to méně bezpečné). |
 | Certifikát se nevydá | A záznam nemíří na server, nebo port 80 není otevřený |
 | Tracker se nepřipojí | `./deploy/diagnose.sh` — ukáže port, firewall, registrovaná IMEI i neznámá IMEI z logu |
 | Na živé mapě nic není | Vozidlo musí mít registrované IMEI (záložka Zařízení) a tracker musí poslat alespoň jednu pozici s platným fixem |
