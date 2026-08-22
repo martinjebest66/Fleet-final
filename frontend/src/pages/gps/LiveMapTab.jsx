@@ -1,7 +1,7 @@
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import { useEffect } from "react";
 import L from "leaflet";
-import { Car, Broadcast, Play } from "@phosphor-icons/react";
+import { Car, Broadcast, Play, ArrowsClockwise } from "@phosphor-icons/react";
 import { Button } from "../../components/ui/button";
 
 const VEHICLE_ICON_ACTIVE = new L.DivIcon({
@@ -29,18 +29,25 @@ function FitBounds({ positions }) {
   return null;
 }
 
-export function LiveMapTab({ livePositions, liveLoading, autoRefresh, setAutoRefresh, simulateAndFetch }) {
+export function LiveMapTab({ livePositions, liveLoading, autoRefresh, setAutoRefresh, simulateAndFetch, refresh, allowMockData }) {
   const validPositions = livePositions.filter(p => p.lat && p.lng);
 
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3 flex-wrap">
-        <Button onClick={simulateAndFetch} variant="outline" disabled={liveLoading} data-testid="simulate-btn">
-          <Play size={18} className="mr-2" />Simulovat pohyb
+        <Button onClick={refresh} variant="outline" disabled={liveLoading} data-testid="refresh-positions-btn">
+          <ArrowsClockwise size={18} className="mr-2" />Obnovit pozice
         </Button>
         <Button onClick={() => setAutoRefresh(!autoRefresh)} variant={autoRefresh ? "default" : "outline"} className={autoRefresh ? "bg-[#16A34A] hover:bg-[#15803D]" : ""} data-testid="auto-refresh-btn">
-          <Broadcast size={18} className="mr-2" />{autoRefresh ? "Auto-refresh ON (5s)" : "Auto-refresh OFF"}
+          <Broadcast size={18} className="mr-2" />{autoRefresh ? "Auto-refresh ON (15s)" : "Auto-refresh OFF"}
         </Button>
+        {/* Demo generator; disabled outside development because it writes into
+            the same collection as real tracker data. */}
+        {allowMockData && (
+          <Button onClick={simulateAndFetch} variant="outline" disabled={liveLoading} data-testid="simulate-btn">
+            <Play size={18} className="mr-2" />Simulovat pohyb
+          </Button>
+        )}
         {liveLoading && <div className="loading-spinner w-5 h-5"></div>}
         <span className="text-sm text-[#52525B]">{validPositions.length} vozidel na mapě</span>
       </div>
@@ -67,6 +74,13 @@ export function LiveMapTab({ livePositions, liveLoading, autoRefresh, setAutoRef
             <div className="bg-white border border-[#E4E4E7] rounded-md p-6 text-center">
               <Car size={32} className="mx-auto text-[#A1A1AA] mb-2" />
               <p className="text-sm text-[#52525B]">Žádná vozidla</p>
+            </div>
+          )}
+          {livePositions.length > 0 && validPositions.length === 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-md p-3 text-xs text-amber-800">
+              Vozidla zatím nemají žádnou GPS pozici. Zkontrolujte, že je tracker
+              zaregistrovaný v záložce <strong>Zařízení</strong> a že posílá data
+              na port 5027.
             </div>
           )}
         </div>

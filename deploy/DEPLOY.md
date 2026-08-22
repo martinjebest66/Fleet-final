@@ -212,6 +212,43 @@ docker compose logs -f app
 > **Nikdy nepoužívejte `docker compose down -v`** — smaže volume `mongo_data`,
 > tedy celou databázi. Na restart stačí `docker compose restart`.
 
+## Přenos dat ze starého nasazení
+
+Data ze staré instance se **nepřenesou samy** — nový server startuje
+s prázdným volume. Nejčastější past: stará instance běžela s jiným jménem
+databáze (na platformě Emergent to bylo `test_database`), takže data v Mongu
+sice jsou, ale aplikace se dívá do `fleet_manager` a hlásí prázdno.
+
+Co je kde, ukáže diagnostika:
+
+```bash
+./deploy/diagnose.sh
+```
+
+Vypíše všechny databáze s počty záznamů a na kterou se aplikace dívá.
+
+**Data jsou v Mongu pod jiným jménem** — stačí přepnout aplikaci:
+
+```bash
+nano .env          # DB_NAME=test_database
+docker compose up -d
+```
+
+**Data jsou ještě na starém serveru** — vyexportovat a nahrát:
+
+```bash
+# na starém serveru
+mongodump --uri="mongodb://127.0.0.1:27017" --db test_database --archive=stara.gz --gzip
+
+# přenos a import (druhý parametr = jméno zdrojové databáze)
+scp stara.gz novy-server:/opt/Fleet-final/
+./deploy/import-legacy-data.sh stara.gz test_database
+docker compose restart app
+```
+
+Import si předtím udělá zálohu současného stavu a jména databází přemapuje,
+takže data skončí tam, kam se aplikace dívá.
+
 ## Když něco nefunguje
 
 | Příznak | Kde hledat |
@@ -221,7 +258,9 @@ docker compose logs -f app
 | Web hlásí 502 | Kontejner neběží nebo neposlouchá: `docker compose ps`, `curl 127.0.0.1:8080/api/health` |
 | Přihlášení projde, ale data se nenačtou | Chybí `COOKIE_SECURE=true` při HTTPS — prohlížeč cookie zahodí |
 | Certifikát se nevydá | A záznam nemíří na server, nebo port 80 není otevřený |
-| Tracker se nepřipojí | `sudo ufw status` (5027), `docker compose logs app | grep IMEI` |
+| Tracker se nepřipojí | `./deploy/diagnose.sh` — ukáže port, firewall, registrovaná IMEI i neznámá IMEI z logu |
+| Na živé mapě nic není | Vozidlo musí mít registrované IMEI (záložka Zařízení) a tracker musí poslat alespoň jednu pozici s platným fixem |
+| Po nasazení chybí data | `./deploy/diagnose.sh` → sekce „Co je ve všech databázích" (viz Přenos dat výše) |
 | Tachometr chybí | `GET /api/gps/devices/{imei}/raw-io`, viz `CAN_VEHICLE_MILEAGE_IO_IDS` v README |
 
 Stav aplikace kdykoli:
