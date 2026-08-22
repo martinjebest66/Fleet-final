@@ -3,6 +3,10 @@
 #   cp .env.example .env      # then fill in JWT_SECRET and ADMIN_PASSWORD
 #   docker compose up -d --build
 #
+# The web port is published on 127.0.0.1:8080 only — put a reverse proxy
+# (Caddy / Nginx / Traefik) on the host in front of it, or set HTTP_BIND=0.0.0.0
+# to expose the container directly.
+#
 # Never run `docker compose down -v` on a production host: the `mongo_data`
 # volume holds the whole database (vehicles, logbook, GPS history).
 
@@ -25,6 +29,10 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    # MongoDB sizes its WiredTiger cache from the cgroup limit, so setting one
+    # keeps the database from expanding into all available RAM on a small host.
+    mem_limit: "${MONGO_MEM_LIMIT:-1g}"
+    mem_reservation: "${MONGO_MEM_RESERVATION:-256m}"
     logging:
       driver: json-file
       options:
@@ -40,6 +48,11 @@ services:
         # which is what the bundled Nginx configuration provides. Only set this
         # if the API really lives on a different host.
         REACT_APP_BACKEND_URL: "${REACT_APP_BACKEND_URL:-}"
+        # Node heap for the React production build. Webpack needs well over
+        # the default heap on this bundle; on a small VPS the build otherwise
+        # dies with "JavaScript heap out of memory" or is killed outright.
+        # Lower it to ~1536 on a 2 GB host, raise it if the build still fails.
+        NODE_MAX_OLD_SPACE_MB: "${NODE_MAX_OLD_SPACE_MB:-2048}"
     container_name: fleet-app
     restart: unless-stopped
     depends_on:
@@ -70,8 +83,15 @@ services:
       SENDER_EMAIL: "${SENDER_EMAIL:-onboarding@resend.dev}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     ports:
-      - "${HTTP_PORT:-80}:80"      # Web (Nginx -> frontend + API)
-      - "${TELTONIKA_TCP_PORT:-5027}:5027" # Teltonika GPS tracker TCP
+      # Web (Nginx -> frontend + API) bound to loopback only: the container is
+      # reached through a reverse proxy on the host, which terminates TLS.
+      # Nothing on the public interface, so the app cannot be hit directly.
+      # To publish it directly instead, set HTTP_BIND=0.0.0.0 in .env.
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:80"
+      # Teltonika trackers dial in from mobile networks, so this one has to
+      # stay on a public interface — a loopback bind would silently stop all
+      # GPS data.
+      - "${TELTONIKA_BIND:-0.0.0.0}:${TELTONIKA_TCP_PORT:-5027}:5027"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1/api/health"]
       interval: 30s
@@ -79,6 +99,10 @@ services:
       retries: 5
       start_period: 40s
     stop_grace_period: 30s
+    # Runtime ceiling so a runaway report or PDF export cannot take the whole
+    # host down. Uvicorn + Nginx idle at roughly 250 MB.
+    mem_limit: "${APP_MEM_LIMIT:-1g}"
+    mem_reservation: "${APP_MEM_RESERVATION:-256m}"
     logging:
       driver: json-file
       options:

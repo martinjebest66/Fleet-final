@@ -30,7 +30,23 @@ docker compose up -d --build
 docker compose logs -f app
 ```
 
-Aplikace poběží na `http://<server>/`, health check na `http://<server>/api/health`.
+Aplikace poslouchá na **`127.0.0.1:8080`** — tedy jen na loopbacku. Před ni
+patří reverzní proxy na hostiteli (Caddy, Nginx, Traefik), která terminuje TLS.
+Ověření zevnitř serveru:
+
+```bash
+curl -s http://127.0.0.1:8080/api/health
+```
+
+Pokud reverzní proxy nemáte a chcete kontejner vystavit přímo, nastavte v `.env`:
+
+```env
+HTTP_BIND=0.0.0.0
+HTTP_PORT=80
+```
+
+Port trackerů `5027/TCP` zůstává na veřejném rozhraní — Teltonika se připojuje
+z mobilní sítě, loopback by GPS data tiše zastavil.
 
 > **Pozor:** `docker compose down -v` smaže volume `mongo_data`, tedy celou
 > databázi (vozidla, kniha jízd, GPS historie). Na produkčním serveru ho
@@ -66,7 +82,10 @@ Všechny proměnné jsou popsané v [`.env.example`](.env.example). Nejdůležit
 | `COOKIE_SAMESITE` | `lax` | `none` jen při frontendu na jiné doméně (vyžaduje `COOKIE_SECURE=true`) |
 | `CORS_ORIGINS` | prázdné | seznam originů; prázdné = same-origin, middleware se vůbec nepřidá |
 | `REACT_APP_BACKEND_URL` | prázdné | build-time; prázdné = relativní `/api` |
-| `TELTONIKA_TCP_PORT` | `5027` | port TCP přijímače GPS trackerů |
+| `HTTP_BIND` / `HTTP_PORT` | `127.0.0.1` / `8080` | kde se publikuje web; `0.0.0.0` vystaví kontejner přímo |
+| `TELTONIKA_BIND` / `TELTONIKA_TCP_PORT` | `0.0.0.0` / `5027` | port TCP přijímače GPS trackerů |
+| `NODE_MAX_OLD_SPACE_MB` | `2048` | velikost Node heapu při buildu frontendu |
+| `APP_MEM_LIMIT` / `MONGO_MEM_LIMIT` | `1g` / `1g` | paměťové stropy běžících kontejnerů |
 | `ALLOW_MOCK_DATA` | `false` (v produkci) | generátory ukázkových GPS dat |
 | `ADMIN_PASSWORD_RESET_ON_START` | `false` | přepsat heslo admina při každém startu |
 | `ICS_ALLOW_PRIVATE_HOSTS` | `false` | povolit ICS kalendáře na interních adresách |
@@ -81,6 +100,30 @@ COOKIE_SAMESITE=lax
 ```
 
 Aplikace čte `X-Forwarded-Proto`; proxy ho musí posílat.
+
+### Paměť
+
+Build Reactu je nejnáročnější část nasazení. Webpack potřebuje výrazně víc než
+výchozí Node heap; na malém VPS build jinak skončí hláškou
+`JavaScript heap out of memory`, nebo ho zabije kernel a Docker ohlásí jen
+`exit code 137`. Velikost heapu je proto explicitní:
+
+```env
+NODE_MAX_OLD_SPACE_MB=1536   # 2 GB server
+NODE_MAX_OLD_SPACE_MB=2048   # výchozí, 4 GB server
+```
+
+Jednorázově i bez `.env`:
+
+```bash
+docker compose build --build-arg NODE_MAX_OLD_SPACE_MB=1536
+```
+
+Běžící kontejnery mají strop `APP_MEM_LIMIT` a `MONGO_MEM_LIMIT` (výchozí 1 GB
+každý). MongoDB si podle cgroup limitu sama zmenší WiredTiger cache, takže
+nezabere všechnu RAM. Na serveru s 1 GB RAM buildujte obraz jinde
+(`docker build` na silnějším stroji + `docker push`), místní build se tam
+nevejde.
 
 ### MongoDB
 
