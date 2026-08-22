@@ -26,6 +26,15 @@ export function TripHistoryTab({ trips, vehicles, selectedVehicle, setSelectedVe
     ? [points[0].lat, points[0].lng]
     : [50.0755, 14.4378];
   const routePositions = points.map(p => [p.lat, p.lng]);
+  const stateStart = selectedRoute?.stateStart;
+  const stateEnd = selectedRoute?.stateEnd;
+
+  const formatOdo = (state) =>
+    state?.odometer_km != null
+      ? `${state.odometer_km.toLocaleString("cs-CZ")} km${state.odometer_is_estimate ? " (odhad)" : ""}`
+      : "—";
+  const formatFuel = (state) =>
+    state?.fuel_level_percent != null ? `${state.fuel_level_percent} %` : "—";
 
   return (
     <>
@@ -103,6 +112,28 @@ export function TripHistoryTab({ trips, vehicles, selectedVehicle, setSelectedVe
                     <span className="font-medium">{(selectedTrip.distance / 1000).toFixed(1)} km</span>
                     <span>Max: {selectedTrip.max_speed} km/h</span>
                   </div>
+                  {(stateStart || stateEnd) && (
+                    <table className="mt-3 text-xs border-t border-[#E4E4E7] pt-2 w-full"
+                           data-testid="trip-state-table">
+                      <thead>
+                        <tr className="text-[#A1A1AA]"><th className="text-left font-normal pr-3"></th>
+                          <th className="text-right font-normal pr-3">Tachometr</th>
+                          <th className="text-right font-normal">Palivo</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td className="text-[#52525B] pr-3">Začátek</td>
+                          <td className="text-right pr-3 font-medium">{formatOdo(stateStart)}</td>
+                          <td className="text-right font-medium">{formatFuel(stateStart)}</td>
+                        </tr>
+                        <tr>
+                          <td className="text-[#52525B] pr-3">Konec</td>
+                          <td className="text-right pr-3 font-medium">{formatOdo(stateEnd)}</td>
+                          <td className="text-right font-medium">{formatFuel(stateEnd)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  )}
                 </div>
                 <MapContainer center={mapCenter} zoom={13} style={{ height: "100%", width: "100%" }} scrollWheelZoom={true}>
                   <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />

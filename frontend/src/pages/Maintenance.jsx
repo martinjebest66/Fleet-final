@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { API } from "../App";
 import { errorMessage } from "@/lib/api";
-import { Wrench, Plus, Trash, PencilSimple, CalendarCheck, Warning, CheckCircle, Clock } from "@phosphor-icons/react";
+import { Wrench, Plus, Trash, PencilSimple, CalendarCheck, Warning, CheckCircle, Clock, Paperclip } from "@phosphor-icons/react";
+import { MaintenanceDocuments } from "./maintenance/MaintenanceDocuments";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -41,6 +42,7 @@ export default function Maintenance() {
   const [filterVehicle, setFilterVehicle] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [formData, setFormData] = useState(emptyForm);
+  const [docsFor, setDocsFor] = useState(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -55,6 +57,11 @@ export default function Maintenance() {
       setItems(itemsRes.data);
       setVehicles(vehiclesRes.data);
       setSummary(summaryRes.data);
+      // The documents dialog holds a copy of one item; refresh it so an
+      // upload or a delete shows up without reopening the dialog.
+      setDocsFor((current) => current
+        ? itemsRes.data.find((i) => i.maintenance_id === current.maintenance_id) || null
+        : null);
     } catch (err) { toast.error(errorMessage(err, "Nepodařilo se načíst údržbu")); }
     finally { setLoading(false); }
   }, [filterVehicle, filterStatus]);
@@ -218,7 +225,20 @@ export default function Maintenance() {
                   )}
                 </div>
                 {item.notes && <p className="text-xs text-[#52525B] mt-3 italic">{item.notes}</p>}
+                {item.documents?.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setDocsFor(item)}
+                    className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[#002FA7] hover:underline"
+                    data-testid={`documents-badge-${item.maintenance_id}`}
+                  >
+                    <Paperclip size={14} />{item.documents.length} dokladů
+                  </button>
+                )}
                 <div className="flex gap-2 mt-4 pt-4 border-t border-[#E4E4E7]">
+                  <Button variant="outline" size="sm" onClick={() => setDocsFor(item)} className="flex-1" data-testid={`documents-maintenance-${item.maintenance_id}`}>
+                    <Paperclip size={16} className="mr-1" />Doklady
+                  </Button>
                   <Button variant="outline" size="sm" onClick={() => openEdit(item)} className="flex-1" data-testid={`edit-maintenance-${item.maintenance_id}`}>
                     <PencilSimple size={16} className="mr-1" />Upravit
                   </Button>
@@ -281,6 +301,23 @@ export default function Maintenance() {
               <Button type="submit" className="bg-[#002FA7] hover:bg-[#002480]" disabled={!formData.vehicle_id} data-testid="maintenance-submit-btn">{editingId ? "Uložit" : "Vytvořit"}</Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Photographed documents for one maintenance record */}
+      <Dialog open={Boolean(docsFor)} onOpenChange={(open) => !open && setDocsFor(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              Doklady — {docsFor ? getTypeLabel(docsFor.type, docsFor.custom_label) : ""}
+            </DialogTitle>
+          </DialogHeader>
+          {docsFor && (
+            <>
+              <p className="text-sm text-[#52525B] -mt-2">{docsFor.vehicle_info}</p>
+              <MaintenanceDocuments item={docsFor} onChanged={fetchData} />
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

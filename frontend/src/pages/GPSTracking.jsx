@@ -94,7 +94,12 @@ export default function GPSTracking() {
         withCredentials: true,
         signal: controller.signal,
       })
-      .then((res) => setSelectedRoute({ points: res.data.points || [], loading: false }))
+      .then((res) => setSelectedRoute({
+        points: res.data.points || [],
+        stateStart: res.data.state_start,
+        stateEnd: res.data.state_end,
+        loading: false,
+      }))
       .catch((err) => {
         if (axios.isCancel(err) || err.name === "CanceledError") return;
         setSelectedRoute({ points: [], loading: false });

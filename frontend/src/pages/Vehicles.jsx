@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { VehicleCard } from "./vehicles/VehicleCard";
 import { VehicleFormModal } from "./vehicles/VehicleFormModal";
 import { VehicleQRModal } from "./vehicles/VehicleQRModal";
+import { VehicleStateModal } from "./vehicles/VehicleStateModal";
 
 const INITIAL_FORM = {
   registration_plate: "",
@@ -28,6 +29,7 @@ export default function Vehicles() {
   const [showModal, setShowModal] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showQRModal, setShowQRModal] = useState(false);
+  const [showStateModal, setShowStateModal] = useState(false);
   const [selectedVehicle, setSelectedVehicle] = useState(null);
   const [qrType, setQrType] = useState("fuel");
   const [formData, setFormData] = useState(INITIAL_FORM);
@@ -106,6 +108,11 @@ export default function Vehicles() {
     setShowDeleteDialog(true);
   };
 
+  const openStateModal = (vehicle) => {
+    setSelectedVehicle(vehicle);
+    setShowStateModal(true);
+  };
+
   const openQRModal = (vehicle, type) => {
     setSelectedVehicle(vehicle);
     setQrType(type);
@@ -150,6 +157,7 @@ export default function Vehicles() {
               onEdit={openEditModal}
               onDelete={openDeleteDialog}
               onQR={openQRModal}
+              onState={openStateModal}
             />
           ))}
         </div>
@@ -181,6 +189,12 @@ export default function Vehicles() {
         onOpenChange={setShowQRModal}
         vehicle={selectedVehicle}
         qrType={qrType}
+      />
+
+      <VehicleStateModal
+        open={showStateModal}
+        onOpenChange={setShowStateModal}
+        vehicle={selectedVehicle}
       />
 
       {/* Delete Confirmation */}

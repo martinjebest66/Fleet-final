@@ -206,6 +206,64 @@ Jeden vadný řádek nikdy neshodí zbytek souboru.
 
 ---
 
+## Stav tachometru a paliva k datu
+
+Otázku „jaký stav tachometru a paliva mělo vozidlo k určitému datu?" zodpovídá
+tlačítko **Stav tachometru a paliva** na kartě vozidla. Po zvolení data se
+zobrazí odečet, graf vývoje za období a tabulka po dnech; u GPS jízdy se stav
+na začátku a na konci ukáže přímo v detailu trasy.
+
+Údaje se nikde neukládají podruhé — skládají se ze záznamů, které aplikace
+vede tak jako tak:
+
+| Zdroj | Co dává |
+|---|---|
+| GPS tracker | ujetá vzdálenost (AVL IO 16) a stav paliva (IO 48 / 390) |
+| Tankování | odečet tachometru z palubní desky |
+| Předávací protokol | odečet tachometru a stav palivoměru |
+| Kniha jízd | tachometr na konci jízdy |
+
+Tachometr k danému okamžiku = **poslední ručně zapsaný odečet** plus
+vzdálenost, kterou od té doby zaznamenal tracker. Takový údaj je vždy označen
+jako **odhad** a je u něj vidět, ze kterého záznamu vychází — nikdy se netváří
+jako odečet z palubní desky. Když k datu žádný záznam neexistuje, vrátí se
+prázdná hodnota, ne nula.
+
+Tracker po výměně začíná počítat od nuly; záporný přírůstek se nikdy
+neodečítá.
+
+API:
+
+| Endpoint | Popis |
+|---|---|
+| `GET /api/vehicles/{id}/state?at=2026-08-20` | stav k okamžiku vč. původu údaje |
+| `GET /api/vehicles/{id}/state/history?date_from&date_to` | záznamy a denní přehled |
+| `GET /api/gps/trips/{id}/route` | trasa + stav na začátku a na konci jízdy |
+
+Hustý proud z trackeru se pro zobrazení prořezává (`max_points`); uložená data
+zůstávají kompletní.
+
+## Doklady k servisu a údržbě
+
+Ke každé položce údržby lze připojit vyfocené doklady — fakturu, protokol
+o STK, stránku ze servisní knihy, účtenku. Na telefonu otevře tlačítko
+**Vyfotit doklad** rovnou fotoaparát, takže doklad se dá pořídit na místě
+u servisu.
+
+Přijímají se obrázky (JPEG, PNG, WebP, HEIC/HEIF) a PDF do
+`MAX_UPLOAD_BYTES` (výchozí 10 MB). Ostatní typy se odmítnou.
+
+Binární data leží v samostatné kolekci `maintenance_documents`, v položce
+údržby zůstávají jen metadata. Seznam údržby proto zůstává malý i s desítkami
+fotek a nehrozí naražení na 16MB limit dokumentu v MongoDB. Smazání položky
+údržby smaže i její doklady.
+
+| Endpoint | Popis |
+|---|---|
+| `POST /api/maintenance/{id}/documents` | nahrání dokladu (`file`, `doc_type`, `label`) |
+| `GET /api/maintenance/documents/{doc_id}/file` | zobrazení / stažení dokladu |
+| `DELETE /api/maintenance/documents/{doc_id}` | smazání dokladu (admin) |
+
 ## Reportovací API
 
 | Endpoint | Popis |
@@ -280,6 +338,7 @@ backend/
   config.py       konfigurace z prostředí + kontroly produkčního nasazení
   database.py     připojení k MongoDB, čekání na start, indexy
   trips.py        jednotný model jízdy a reportovací vrstva
+  vehicle_state.py stav tachometru a paliva k datu (odvozený z ostatních záznamů)
   ruhavik.py      parsování Ruhavik exportů + idempotentní import
   teltonika.py    Codec 8 / 8E parser a TCP přijímač
   tests/          jednotkové a API testy

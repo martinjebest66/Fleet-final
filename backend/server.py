@@ -7,7 +7,7 @@ import io
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Dict, List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
@@ -31,6 +31,7 @@ from pymongo.errors import BulkWriteError, PyMongoError
 import database
 import ruhavik as ruhavik_import
 import trips as trips_service
+import vehicle_state
 from config import ConfigError, settings
 
 ROOT_DIR = Path(__file__).parent
@@ -374,6 +375,29 @@ class MaintenanceItemCreate(BaseModel):
     notes: Optional[str] = None
 
 
+MAINTENANCE_DOC_TYPES = ("faktura", "STK protokol", "servisní kniha", "účtenka", "foto", "jiné")
+
+
+class MaintenanceDocument(BaseModel):
+    """Metadata of a photographed service/maintenance document.
+
+    The image itself lives in its own collection and is fetched through
+    `/maintenance/documents/{id}/file`; keeping it out of the maintenance
+    record stops a handful of phone photos from bloating every list response
+    (and from running into the 16 MB BSON document limit).
+    """
+    model_config = ConfigDict(extra="ignore")
+    document_id: str
+    doc_type: str = "foto"
+    label: Optional[str] = None
+    filename: Optional[str] = None
+    content_type: str = "image/jpeg"
+    size_bytes: int = 0
+    url: str
+    uploaded_at: datetime
+    uploaded_by: Optional[str] = None
+
+
 class MaintenanceItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
     maintenance_id: str
@@ -389,6 +413,7 @@ class MaintenanceItem(BaseModel):
     next_due_odometer: Optional[int] = None
     status: str = "ok"  # ok, blíží se, po termínu
     notes: Optional[str] = None
+    documents: List[MaintenanceDocument] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -540,6 +565,12 @@ def clear_login_attempts(request: Request, identifier: str) -> None:
 
 
 # ======================== HELPERS ========================
+
+# Image formats accepted from a phone camera. HEIC/HEIF are what an iPhone
+# produces by default.
+ALLOWED_UPLOAD_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+
+
 
 def parse_datetime_field(doc: dict, field: str):
     """Convert an ISO string field to datetime in-place if needed."""
@@ -1081,6 +1112,110 @@ async def delete_vehicle(vehicle_id: str, user: User = Depends(get_admin_user)):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
     return {"message": "Vozidlo smazáno"}
+
+# ── Odometer and fuel history ──
+# "What was the odometer and the fuel level of this car on that date?"
+# Readings are derived from records the application already keeps (tracker
+# positions, refuelling, handovers, logbook) — see backend/vehicle_state.py.
+
+def _serialize_reading(reading: dict) -> dict:
+    out = dict(reading)
+    for field in ("at",):
+        value = out.get(field)
+        if isinstance(value, datetime):
+            out[field] = value.isoformat()
+    return out
+
+
+@api_router.get("/vehicles/{vehicle_id}/state")
+async def get_vehicle_state_at(
+    vehicle_id: str,
+    at: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """Odometer and fuel level of a vehicle at a moment in time.
+
+    `at` accepts a date (`2026-08-20`) or a full timestamp; without it the
+    current state is returned. The answer always says which record it came
+    from, and whether the odometer is a written-down reading or an estimate
+    extrapolated from tracker distance.
+    """
+    vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+
+    if at:
+        moment = trips_service.to_utc(at if "T" in at or " " in at else f"{at}T23:59:59")
+        if moment is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Neplatný formát parametru 'at'. Použijte YYYY-MM-DD nebo YYYY-MM-DDTHH:MM.",
+            )
+    else:
+        moment = datetime.now(timezone.utc)
+
+    readings = await vehicle_state.collect_readings(
+        db, vehicle_id, date_to=trips_service.local_date_of(moment)
+    )
+    state = vehicle_state.state_at(readings, moment)
+
+    return {
+        "vehicle_id": vehicle_id,
+        "vehicle_info": _vehicle_label(vehicle),
+        "registration_plate": vehicle.get("registration_plate"),
+        "current_odometer": vehicle.get("odometer"),
+        **{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in state.items()},
+        "readings_considered": len(readings),
+    }
+
+
+@api_router.get("/vehicles/{vehicle_id}/state/history")
+async def get_vehicle_state_history(
+    vehicle_id: str,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    include_gps: bool = True,
+    max_points: int = Query(500, ge=10, le=5000),
+    user: User = Depends(get_current_user),
+):
+    """Odometer/fuel readings over a period, plus a per-day summary.
+
+    The tracker stream is thinned for display only — nothing is removed from
+    storage, and every hand-written reading is always kept.
+    """
+    vehicle = await db.vehicles.find_one({"vehicle_id": vehicle_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vozidlo nenalezeno")
+
+    if not date_to:
+        date_to = datetime.now(timezone.utc).astimezone(trips_service.REPORT_TZ).date().isoformat()
+    if not date_from:
+        date_from = (
+            datetime.now(timezone.utc) - timedelta(days=30)
+        ).astimezone(trips_service.REPORT_TZ).date().isoformat()
+
+    readings = await vehicle_state.collect_readings(
+        db, vehicle_id, date_from=date_from, date_to=date_to, include_gps=include_gps
+    )
+    in_window = [
+        r for r in readings
+        if r["date"] and date_from <= r["date"] <= date_to
+    ]
+    daily = vehicle_state.daily_summary(in_window)
+    shown = vehicle_state.downsample(in_window, max_points)
+
+    return {
+        "vehicle_id": vehicle_id,
+        "vehicle_info": _vehicle_label(vehicle),
+        "date_from": date_from,
+        "date_to": date_to,
+        "readings": [_serialize_reading(r) for r in shown],
+        "total_readings": len(in_window),
+        "downsampled": len(shown) < len(in_window),
+        "daily": daily,
+        "sources": sorted({r["source"] for r in in_window}),
+    }
+
 
 # Public endpoint for QR code vehicle info
 @api_router.get("/public/vehicle/{qr_code}")
@@ -1670,12 +1805,38 @@ async def get_gps_trip_route(
             sampled[-1] = points[-1]
         points = sampled
 
+    # Odometer and fuel level at both ends of the drive, so the trip list can
+    # answer "what did the car show when this drive started / finished?"
+    start_at = trips_service.to_utc(trip.get("start_time"))
+    end_at = trips_service.to_utc(trip.get("end_time"))
+    state_start = state_end = None
+    if start_at:
+        readings = await vehicle_state.collect_readings(
+            db, trip["vehicle_id"], date_to=trips_service.local_date_of(end_at or start_at)
+        )
+        state_start = vehicle_state.state_at(readings, start_at)
+        if end_at:
+            state_end = vehicle_state.state_at(readings, end_at)
+
+    def brief(state):
+        if not state:
+            return None
+        return {
+            "odometer_km": state["odometer_km"],
+            "odometer_is_estimate": state["odometer_is_estimate"],
+            "odometer_source_label": state["odometer_source_label"],
+            "fuel_level_percent": state["fuel_level_percent"],
+            "fuel_source_label": state["fuel_source_label"],
+        }
+
     return {
         "trip_id": trip_id,
         "source": trips_service.trip_source(trip),
         "points": points,
         "total_points": total,
         "downsampled": total > len(points),
+        "state_start": brief(state_start),
+        "state_end": brief(state_end),
     }
 
 # Sample Czech locations for driving school
@@ -2868,15 +3029,50 @@ async def get_maintenance_items(
         query["vehicle_id"] = vehicle_id
     items = await db.maintenance.find(query, {"_id": 0}).sort("next_due_date", 1).to_list(1000)
     await enrich_many(items)
+    documents = await _load_documents([i["maintenance_id"] for i in items])
     results = []
     for item in items:
         parse_datetime_field(item, "created_at")
         parse_datetime_field(item, "updated_at")
         item["status"] = compute_maintenance_status(item)
+        item["documents"] = documents.get(item["maintenance_id"], [])
         if status and item["status"] != status:
             continue
         results.append(MaintenanceItem(**item))
     return results
+
+
+@api_router.get("/maintenance/summary")
+async def get_maintenance_summary(user: User = Depends(get_current_user)):
+    """Get maintenance summary with upcoming/overdue counts"""
+    items = await db.maintenance.find({}, {"_id": 0}).to_list(1000)
+    total = len(items)
+    overdue = 0
+    upcoming = 0
+    ok_count = 0
+    for item in items:
+        s = compute_maintenance_status(item)
+        if s == "po termínu":
+            overdue += 1
+        elif s == "blíží se":
+            upcoming += 1
+        else:
+            ok_count += 1
+    return {"total": total, "overdue": overdue, "upcoming": upcoming, "ok": ok_count}
+
+
+@api_router.get("/maintenance/{maintenance_id}", response_model=MaintenanceItem)
+async def get_maintenance_item(maintenance_id: str, user: User = Depends(get_current_user)):
+    """One maintenance item including its photographed documents."""
+    item = await db.maintenance.find_one({"maintenance_id": maintenance_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Záznam údržby nenalezen")
+    parse_datetime_field(item, "created_at")
+    parse_datetime_field(item, "updated_at")
+    item["status"] = compute_maintenance_status(item)
+    item["documents"] = (await _load_documents([maintenance_id])).get(maintenance_id, [])
+    await enrich_vehicle_info(item)
+    return MaintenanceItem(**item)
 
 
 @api_router.post("/maintenance", response_model=MaintenanceItem)
@@ -2922,26 +3118,122 @@ async def delete_maintenance_item(maintenance_id: str, user: User = Depends(get_
     result = await db.maintenance.delete_one({"maintenance_id": maintenance_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Záznam údržby nenalezen")
-    return {"message": "Záznam údržby smazán"}
+    # Otherwise the photographed documents stay behind as orphans nobody can
+    # reach or delete.
+    removed = await db.maintenance_documents.delete_many({"maintenance_id": maintenance_id})
+    return {"message": "Záznam údržby smazán", "documents_deleted": removed.deleted_count}
 
 
-@api_router.get("/maintenance/summary")
-async def get_maintenance_summary(user: User = Depends(get_current_user)):
-    """Get maintenance summary with upcoming/overdue counts"""
-    items = await db.maintenance.find({}, {"_id": 0}).to_list(1000)
-    total = len(items)
-    overdue = 0
-    upcoming = 0
-    ok_count = 0
-    for item in items:
-        s = compute_maintenance_status(item)
-        if s == "po termínu":
-            overdue += 1
-        elif s == "blíží se":
-            upcoming += 1
-        else:
-            ok_count += 1
-    return {"total": total, "overdue": overdue, "upcoming": upcoming, "ok": ok_count}
+# ── Photographed service / maintenance documents ──
+# Invoices, STK protocols and service-book pages are photographed on a phone
+# and attached to the maintenance record they belong to. The binary lives in
+# its own collection so a maintenance list stays small.
+
+ALLOWED_DOCUMENT_TYPES = ALLOWED_UPLOAD_TYPES | {"application/pdf"}
+
+
+async def _load_documents(maintenance_ids: List[str]) -> Dict[str, List[dict]]:
+    """Document metadata for the given maintenance items, in one query."""
+    if not maintenance_ids:
+        return {}
+    docs = await db.maintenance_documents.find(
+        {"maintenance_id": {"$in": maintenance_ids}},
+        {"_id": 0, "data": 0},          # never load the image bytes here
+    ).sort("uploaded_at", 1).to_list(2000)
+    grouped: Dict[str, List[dict]] = {}
+    for doc in docs:
+        parse_datetime_field(doc, "uploaded_at")
+        doc["url"] = f"/api/maintenance/documents/{doc['document_id']}/file"
+        grouped.setdefault(doc["maintenance_id"], []).append(doc)
+    return grouped
+
+
+@api_router.post("/maintenance/{maintenance_id}/documents", response_model=MaintenanceDocument)
+async def upload_maintenance_document(
+    maintenance_id: str,
+    file: UploadFile = File(...),
+    doc_type: str = Form("foto"),
+    label: Optional[str] = Form(None),
+    user: User = Depends(get_current_user),
+):
+    """Attach a photographed document (invoice, STK protocol, receipt, …)."""
+    item = await db.maintenance.find_one({"maintenance_id": maintenance_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Záznam údržby nenalezen")
+
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    if content_type not in ALLOWED_DOCUMENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Nepodporovaný typ souboru: {content_type or 'neznámý'}. "
+                   f"Povolené: {', '.join(sorted(ALLOWED_DOCUMENT_TYPES))}.",
+        )
+    content = await _read_upload(file, settings.max_upload_bytes)
+    if not content:
+        raise HTTPException(status_code=400, detail="Nahraný soubor je prázdný.")
+
+    if doc_type not in MAINTENANCE_DOC_TYPES:
+        doc_type = "jiné"
+
+    now = datetime.now(timezone.utc)
+    document_id = f"mdoc_{uuid.uuid4().hex[:12]}"
+    # Stored as BSON binary rather than a base64 string: a third smaller, and
+    # it can be streamed back without a decode step.
+    await db.maintenance_documents.insert_one({
+        "document_id": document_id,
+        "maintenance_id": maintenance_id,
+        "vehicle_id": item["vehicle_id"],
+        "doc_type": doc_type,
+        "label": (label or "").strip() or None,
+        "filename": os.path.basename(file.filename or "dokument"),
+        "content_type": content_type,
+        "size_bytes": len(content),
+        "data": content,
+        "uploaded_at": now.isoformat(),
+        "uploaded_by": user.email or user.name,
+    })
+    logger.info(
+        "Doklad k údržbě %s nahrán (%s, %.1f kB) uživatelem %s",
+        maintenance_id, doc_type, len(content) / 1024, user.user_id,
+    )
+
+    return MaintenanceDocument(
+        document_id=document_id, doc_type=doc_type, label=(label or "").strip() or None,
+        filename=os.path.basename(file.filename or "dokument"), content_type=content_type,
+        size_bytes=len(content), url=f"/api/maintenance/documents/{document_id}/file",
+        uploaded_at=now, uploaded_by=user.email or user.name,
+    )
+
+
+@api_router.get("/maintenance/documents/{document_id}/file")
+async def get_maintenance_document_file(document_id: str, user: User = Depends(get_current_user)):
+    """Stream a stored document image/PDF."""
+    doc = await db.maintenance_documents.find_one({"document_id": document_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Doklad nenalezen")
+    data = doc.get("data") or b""
+    if isinstance(data, str):  # tolerate a legacy base64 payload
+        data = base64.b64decode(data)
+    filename = doc.get("filename") or "dokument"
+    return StreamingResponse(
+        io.BytesIO(bytes(data)),
+        media_type=doc.get("content_type", "application/octet-stream"),
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            # Documents never change once uploaded, and the id is unguessable.
+            "Cache-Control": "private, max-age=86400",
+        },
+    )
+
+
+@api_router.delete("/maintenance/documents/{document_id}")
+async def delete_maintenance_document(document_id: str, user: User = Depends(get_admin_user)):
+    """Remove a stored document."""
+    result = await db.maintenance_documents.delete_one({"document_id": document_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Doklad nenalezen")
+    logger.info("Doklad k údržbě %s smazán uživatelem %s", document_id, user.user_id)
+    return {"message": "Doklad smazán"}
 
 
 # ======================== RUHAVIK IMPORT ROUTES ========================
@@ -3046,9 +3338,6 @@ async def import_ruhavik_data(
 
 
 # ======================== UPLOAD & ROOT ========================
-
-ALLOWED_UPLOAD_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
-
 
 async def _image_to_data_url(file: UploadFile) -> dict:
     """Validate an uploaded image and return it as a data URL.

@@ -1,7 +1,7 @@
-import { Car, Pencil, Trash, QrCode, Handshake } from "@phosphor-icons/react";
+import { Car, Pencil, Trash, QrCode, Handshake, Gauge } from "@phosphor-icons/react";
 import { Button } from "../../components/ui/button";
 
-export function VehicleCard({ vehicle, getInstructorName, onEdit, onDelete, onQR }) {
+export function VehicleCard({ vehicle, getInstructorName, onEdit, onDelete, onQR, onState }) {
   return (
     <div
       className="bg-white border border-[#E4E4E7] rounded-md p-6 card-hover"
@@ -46,6 +46,19 @@ export function VehicleCard({ vehicle, getInstructorName, onEdit, onDelete, onQR
         <Button variant="outline" size="sm" onClick={() => onQR(vehicle, "damage")} className="flex-1" data-testid={`qr-damage-${vehicle.vehicle_id}`}>
           <QrCode size={16} className="mr-1" />
           Poškození
+        </Button>
+      </div>
+
+      <div className="mt-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onState(vehicle)}
+          className="w-full"
+          data-testid={`vehicle-state-${vehicle.vehicle_id}`}
+        >
+          <Gauge size={16} className="mr-1" />
+          Stav tachometru a paliva
         </Button>
       </div>
 
