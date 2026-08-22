@@ -11,7 +11,11 @@ APP="${APP_CONTAINER:-fleet-app}"
 MONGO="${MONGO_CONTAINER:-fleet-mongo}"
 BASE="${FLEET_BASE_URL:-http://127.0.0.1:${HTTP_PORT:-8080}}"
 
-hr() { printf '\n\033[1m── %s ─────────────────────────────\033[0m\n' "$1"; }
+REPORT_FILE="${REPORT_FILE:-/tmp/fleet-report.txt}"
+# Všechno jde i do souboru, aby se dal poslat jedním vložením.
+exec > >(tee "$REPORT_FILE") 2>&1
+
+hr() { printf '\n== %s ==\n' "$1"; }
 mongo_eval() { docker exec "$MONGO" mongosh --quiet --eval "$1" 2>/dev/null; }
 
 hr "Kontejnery"
@@ -29,9 +33,34 @@ curl -s --max-time 10 "$BASE/api/health" || echo "!! API neodpovídá na $BASE"
 echo
 
 hr "Konfigurace, na kterou se aplikace dívá"
-docker exec "$APP" printenv DB_NAME MONGO_URL ENVIRONMENT COOKIE_SECURE 2>/dev/null \
-  | sed 's/^/  /'
+# Hodnoty citlivých proměnných se maskují, aby šel výstup bezpečně sdílet.
+docker exec "$APP" printenv 2>/dev/null \
+  | grep -E '^(DB_NAME|MONGO_URL|ENVIRONMENT|COOKIE_SECURE|COOKIE_SAMESITE|CORS_ORIGINS|HTTP_BIND|HTTP_PORT|TELTONIKA_|ALLOW_MOCK_DATA|CAN_|ADMIN_EMAIL|JWT_SECRET|ADMIN_PASSWORD|RESEND_API_KEY|NODE_MAX|.*_MEM_)' \
+  | sed -E 's/^(JWT_SECRET|ADMIN_PASSWORD|RESEND_API_KEY)=.*/\1=<skryto>/' \
+  | sed -E 's#^(MONGO_URL=[a-z+]+://)[^@]*@#\1<skryto>@#' \
+  | sort | sed 's/^/  /'
 CONFIGURED_DB="$(docker exec "$APP" printenv DB_NAME 2>/dev/null || echo fleet_manager)"
+
+hr "Reverzní proxy na hostiteli"
+if [ -f /etc/caddy/Caddyfile ]; then
+    echo "  /etc/caddy/Caddyfile:"
+    grep -vE '^\s*#' /etc/caddy/Caddyfile | grep -vE '^\s*$' | sed 's/^/    /'
+    systemctl is-active caddy >/dev/null 2>&1 \
+      && echo "  caddy: běží" || echo "  caddy: NEBĚŽÍ (systemctl status caddy)"
+else
+    echo "  /etc/caddy/Caddyfile neexistuje"
+    for svc in nginx apache2 traefik; do
+        systemctl is-active "$svc" >/dev/null 2>&1 && echo "  pozor: běží $svc"
+    done
+fi
+echo "  naslouchající porty na hostiteli:"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) \
+  | grep -E ':(80|443|8080|5027|27017)\b' | sed 's/^/    /' || echo "    (nezjištěno)"
+
+hr "Zdroje serveru"
+free -h 2>/dev/null | sed 's/^/  /'
+df -h / 2>/dev/null | sed 's/^/  /'
+docker stats --no-stream --format '  {{.Name}}: RAM {{.MemUsage}} CPU {{.CPUPerc}}' 2>/dev/null
 
 hr "Co je ve všech databázích MongoDB"
 # Nejdůležitější test: pokud data existují pod JINÝM jménem databáze,
@@ -97,3 +126,6 @@ docker compose logs --tail 2000 app 2>/dev/null | grep -E "Neznámé IMEI|Tracke
 
 hr "Hotovo"
 echo "Zálohu před jakoukoli opravou: ./deploy/backup.sh"
+echo
+echo "Celý výstup uložen do: ${REPORT_FILE:-(neukládá se)}"
+echo "Hesla a secrets jsou v něm zamaskované, dá se bezpečně sdílet."

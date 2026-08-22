@@ -226,6 +226,8 @@ Co je kde, ukáže diagnostika:
 ```
 
 Vypíše všechny databáze s počty záznamů a na kterou se aplikace dívá.
+Celý výstup se zároveň uloží do `/tmp/fleet-report.txt`; hesla a secrets
+jsou v něm zamaskované, takže se dá poslat při žádosti o pomoc.
 
 **Data jsou v Mongu pod jiným jménem** — stačí přepnout aplikaci:
 
